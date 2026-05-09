@@ -1,0 +1,14 @@
+Gli stili QML presenti nella cartella stili/ sono predisposti per rappresentare il dataset DUSAF 7.0.
+
+Gli stili DUSAF riprendono/adattano la simbologia associata al dataset DUSAF di Regione Lombardia.
+
+Fonte:
+Regione Lombardia - Geoportale della Lombardia
+DUSAF 7.0 - Uso e copertura del suolo
+
+Attribuzione:
+Fonte: Regione Lombardia - Geoportale della Lombardia, DUSAF 7.0.
+Elaborazione e adattamento QGIS: Marco Stefano La Sala.
+
+Il codice Python del plugin è distribuito con licenza AGPL-3.0.
+Gli stili QML derivati o adattati da materiali regionali devono mantenere attribuzione alla fonte originaria.
