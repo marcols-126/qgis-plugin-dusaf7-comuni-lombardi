@@ -2,12 +2,9 @@
 
 import os
 import re
-import csv
 from datetime import datetime
 
-import processing
-
-from qgis.PyQt.QtCore import QVariant, Qt, QStringListModel
+from qgis.PyQt.QtCore import Qt, QStringListModel
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCompleter,
@@ -26,21 +23,25 @@ except Exception:
 
 from qgis.core import (
     QgsApplication,
-    QgsCoordinateReferenceSystem,
     QgsFeatureRequest,
-    QgsField,
-    QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingOutputFile,
     QgsProcessingParameterNumber,
     QgsProcessingParameterString,
-    QgsProcessingUtils,
     QgsProject,
-    QgsVectorFileWriter,
     QgsVectorLayer,
-    edit,
 )
+
+from .workflow import pipeline, qc, output
+from .workflow.output import (
+    STYLE_CONFINE,
+    STYLE_DUSAF_CLIP_QC,
+    STYLE_DUSAF_FINAL,
+    STYLE_FOLDER_NAME,
+    STYLE_SLIVERS,
+)
+from .workflow.qc import AUDIT_TOLERANCE_M2
 
 
 # =============================================================================
@@ -53,8 +54,7 @@ COMUNI_REQUIRED_LAYER_NAME = "Com01012026_WGS84"
 DUSAF_CLASS_FIELD = "COD_TOT"
 DUSAF_DESC_FIELD = "DESCR"
 
-TARGET_CRS = QgsCoordinateReferenceSystem("EPSG:32632")
-AUDIT_TOLERANCE_M2 = 1.0
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
 URL_CONFINI_ISTAT_2026 = (
     "https://www.istat.it/notizia/confini-delle-unita-amministrative-a-fini-statistici-al-1-gennaio-2018-2/"
@@ -75,13 +75,6 @@ PRE_RUN_ALERT = (
     "nel progetto QGIS i dati di base: DUSAF7 di Regione Lombardia e Confini amministrativi "
     "ISTAT 2026 Com01012026_WGS84. Senza questi layer lo strumento non può funzionare correttamente."
 )
-
-STYLE_FOLDER_NAME = "stili"
-PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-STYLE_DUSAF_FINAL = "DUSAF7 - superfici.qml"
-STYLE_DUSAF_CLIP_QC = "DUSAF7 - clip QC.qml"
-STYLE_CONFINE = "Confine.qml"
-STYLE_SLIVERS = "QC slivers DUSAF7.qml"
 
 MUNICIPALITY_FIELD_CANDIDATES = [
     "COMUNE",
@@ -846,72 +839,6 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         return canonical_name, municipality_field, region_code_field, region_name_field
 
     # -------------------------------------------------------------------------
-    # STILI
-    # -------------------------------------------------------------------------
-
-    def _style_path(self, project_dir, style_filename):
-        """
-        Cerca gli stili QML in modo portabile:
-        1. cartella stili del progetto QGIS attivo;
-        2. cartella stili inclusa nel plugin.
-        """
-        project_style_path = os.path.join(project_dir, STYLE_FOLDER_NAME, style_filename)
-        if os.path.exists(project_style_path):
-            return project_style_path
-
-        plugin_style_path = os.path.join(PLUGIN_DIR, STYLE_FOLDER_NAME, style_filename)
-        if os.path.exists(plugin_style_path):
-            return plugin_style_path
-
-        return project_style_path
-
-    def _apply_style(self, layer, project_dir, style_filename, feedback):
-        if layer is None or not layer.isValid():
-            self._warn(feedback, f"[STYLE WARNING] Layer non valido. Stile non applicato: {style_filename}")
-            return
-
-        style_path = self._style_path(project_dir, style_filename)
-
-        if not os.path.exists(style_path):
-            self._warn(
-                feedback,
-                f"[STYLE WARNING] File stile non trovato: {style_path}. "
-                "Il layer resta con simbologia di default."
-            )
-            return
-
-        try:
-            result = layer.loadNamedStyle(style_path)
-
-            success = True
-            message = ""
-
-            if isinstance(result, tuple):
-                if len(result) >= 2:
-                    message = str(result[0])
-                    success = bool(result[1])
-                elif len(result) == 1:
-                    message = str(result[0])
-
-            layer.triggerRepaint()
-
-            if success:
-                self._msg(feedback, f"[STYLE OK] Applicato stile '{style_filename}' al layer '{layer.name()}'.")
-            else:
-                self._warn(
-                    feedback,
-                    f"[STYLE WARNING] Stile '{style_filename}' non applicato correttamente al layer "
-                    f"'{layer.name()}'. Messaggio: {message}"
-                )
-
-        except Exception as e:
-            self._warn(
-                feedback,
-                f"[STYLE WARNING] Errore durante applicazione stile '{style_filename}' "
-                f"al layer '{layer.name()}': {e}"
-            )
-
-    # -------------------------------------------------------------------------
     # CAMPI
     # -------------------------------------------------------------------------
 
@@ -947,341 +874,6 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
 
     def _find_optional_field(self, layer, candidates):
         return _first_available_field(layer, candidates)
-
-    # -------------------------------------------------------------------------
-    # PROCESSING HELPERS
-    # -------------------------------------------------------------------------
-
-    def _layer_from_output(self, output_object, context, layer_name):
-        if isinstance(output_object, QgsVectorLayer):
-            output_object.setName(layer_name)
-            return output_object
-
-        layer = QgsProcessingUtils.mapLayerFromString(str(output_object), context)
-
-        if layer is not None and layer.isValid():
-            layer.setName(layer_name)
-            return layer
-
-        layer = QgsVectorLayer(str(output_object), layer_name, "ogr")
-
-        if layer.isValid():
-            return layer
-
-        raise QgsProcessingException(f"Output Processing non valido: {layer_name}")
-
-    def _run(self, alg_id, params, context, feedback, out_name):
-        if feedback.isCanceled():
-            raise QgsProcessingException("Operazione annullata dall'utente.")
-
-        self._msg(feedback, f"[RUN] {alg_id} -> {out_name}")
-
-        result = processing.run(
-            alg_id,
-            params,
-            context=context,
-            feedback=feedback,
-            is_child_algorithm=True,
-        )
-
-        if "OUTPUT" not in result:
-            raise QgsProcessingException(f"L'algoritmo {alg_id} non ha restituito OUTPUT.")
-
-        return self._layer_from_output(result["OUTPUT"], context, out_name)
-
-    def _fix_geometries(self, input_layer, context, feedback, out_name):
-        params = {
-            "INPUT": input_layer,
-            "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-        }
-
-        try:
-            params_with_method = dict(params)
-            params_with_method["METHOD"] = 1
-            return self._run("native:fixgeometries", params_with_method, context, feedback, out_name)
-        except Exception:
-            return self._run("native:fixgeometries", params, context, feedback, out_name)
-
-    def _reproject(self, input_layer, context, feedback, out_name):
-        return self._run(
-            "native:reprojectlayer",
-            {
-                "INPUT": input_layer,
-                "TARGET_CRS": TARGET_CRS,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    def _extract_by_expression(self, input_layer, expression, context, feedback, out_name):
-        self._msg(feedback, f"[EXPRESSION] {expression}")
-
-        return self._run(
-            "native:extractbyexpression",
-            {
-                "INPUT": input_layer,
-                "EXPRESSION": expression,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    def _clip(self, input_layer, overlay_layer, context, feedback, out_name):
-        return self._run(
-            "native:clip",
-            {
-                "INPUT": input_layer,
-                "OVERLAY": overlay_layer,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    def _dissolve_all(self, input_layer, context, feedback, out_name):
-        return self._run(
-            "native:dissolve",
-            {
-                "INPUT": input_layer,
-                "FIELD": [],
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    def _dissolve_by_fields(self, input_layer, fields, context, feedback, out_name):
-        return self._run(
-            "native:dissolve",
-            {
-                "INPUT": input_layer,
-                "FIELD": fields,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    def _multipart_to_singleparts(self, input_layer, context, feedback, out_name):
-        return self._run(
-            "native:multiparttosingleparts",
-            {
-                "INPUT": input_layer,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    # -------------------------------------------------------------------------
-    # QC E CALCOLI
-    # -------------------------------------------------------------------------
-
-    def _count_invalid_geometries(self, layer):
-        total = 0
-        invalid = 0
-        empty = 0
-
-        for feat in layer.getFeatures():
-            total += 1
-            geom = feat.geometry()
-
-            if geom is None or geom.isEmpty():
-                empty += 1
-            elif not geom.isGeosValid():
-                invalid += 1
-
-        return total, invalid, empty
-
-    def _total_area_m2(self, layer):
-        total = 0.0
-
-        for feat in layer.getFeatures():
-            geom = feat.geometry()
-
-            if geom is not None and not geom.isEmpty():
-                total += geom.area()
-
-        return total
-
-    def _add_or_reset_fields(self, layer, field_defs):
-        provider = layer.dataProvider()
-        existing_names = [field.name() for field in layer.fields()]
-
-        to_delete = []
-
-        for field in field_defs:
-            if field.name() in existing_names:
-                idx = layer.fields().indexFromName(field.name())
-                if idx >= 0:
-                    to_delete.append(idx)
-
-        if to_delete:
-            provider.deleteAttributes(to_delete)
-            layer.updateFields()
-
-        provider.addAttributes(field_defs)
-        layer.updateFields()
-
-    def _add_area_fields(
-        self,
-        layer,
-        sliver_min_area_m2=None,
-        total_dusaf_m2=None,
-        boundary_area_m2=None,
-        include_sliver=False,
-        include_percentages=False,
-    ):
-        fields = [
-            QgsField("area_m2", QVariant.Double, "double", 20, 3),
-            QgsField("area_ha", QVariant.Double, "double", 20, 6),
-        ]
-
-        if include_percentages:
-            fields.append(QgsField("pct_dusaf", QVariant.Double, "double", 20, 6))
-            fields.append(QgsField("pct_comune", QVariant.Double, "double", 20, 6))
-
-        if include_sliver:
-            fields.append(QgsField("sliver", QVariant.Int, "integer", 1, 0))
-
-        self._add_or_reset_fields(layer, fields)
-
-        idx_area_m2 = layer.fields().indexFromName("area_m2")
-        idx_area_ha = layer.fields().indexFromName("area_ha")
-        idx_pct_dusaf = layer.fields().indexFromName("pct_dusaf") if include_percentages else None
-        idx_pct_comune = layer.fields().indexFromName("pct_comune") if include_percentages else None
-        idx_sliver = layer.fields().indexFromName("sliver") if include_sliver else None
-
-        with edit(layer):
-            for feat in layer.getFeatures():
-                geom = feat.geometry()
-                area_m2 = 0.0 if geom is None or geom.isEmpty() else geom.area()
-                area_ha = area_m2 / 10000.0
-
-                layer.changeAttributeValue(feat.id(), idx_area_m2, area_m2)
-                layer.changeAttributeValue(feat.id(), idx_area_ha, area_ha)
-
-                if include_percentages:
-                    pct_dusaf = 0.0 if not total_dusaf_m2 else (area_m2 / total_dusaf_m2) * 100.0
-                    pct_comune = 0.0 if not boundary_area_m2 else (area_m2 / boundary_area_m2) * 100.0
-
-                    layer.changeAttributeValue(feat.id(), idx_pct_dusaf, pct_dusaf)
-                    layer.changeAttributeValue(feat.id(), idx_pct_comune, pct_comune)
-
-                if include_sliver:
-                    threshold = 0.0 if sliver_min_area_m2 is None else float(sliver_min_area_m2)
-                    sliver = 1 if 0.0 < area_m2 <= threshold else 0
-                    layer.changeAttributeValue(feat.id(), idx_sliver, sliver)
-
-        return layer
-
-    # -------------------------------------------------------------------------
-    # OUTPUT
-    # -------------------------------------------------------------------------
-
-    def _save_layer_to_gpkg(self, layer, gpkg_path, layer_name, overwrite_file, context, feedback):
-        options = QgsVectorFileWriter.SaveVectorOptions()
-        options.driverName = "GPKG"
-        options.layerName = layer_name
-
-        if overwrite_file:
-            options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
-        else:
-            options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
-
-        result = QgsVectorFileWriter.writeAsVectorFormatV3(
-            layer,
-            gpkg_path,
-            context.transformContext(),
-            options,
-        )
-
-        err_code = result[0]
-        err_msg = result[1] if len(result) > 1 else ""
-
-        if err_code != QgsVectorFileWriter.NoError:
-            raise QgsProcessingException(f"Errore salvataggio layer '{layer_name}': {err_msg}")
-
-        self._msg(feedback, f"[OK] Salvato layer GeoPackage: {layer_name}")
-
-    def _add_saved_layer_to_project(
-        self,
-        gpkg_path,
-        layer_name,
-        display_name,
-        feedback,
-        project_dir=None,
-        style_filename=None,
-    ):
-        uri = f"{gpkg_path}|layername={layer_name}"
-        layer = QgsVectorLayer(uri, display_name, "ogr")
-
-        if layer.isValid():
-            if project_dir and style_filename:
-                self._apply_style(layer, project_dir, style_filename, feedback)
-
-            QgsProject.instance().addMapLayer(layer)
-            self._msg(feedback, f"[OK] Aggiunto al progetto QGIS: {display_name}")
-        else:
-            self._warn(feedback, f"[WARN] Layer salvato ma non ricaricato nel progetto: {display_name}")
-
-    def _export_summary_csv(self, layer, class_field, desc_field, csv_path, feedback):
-        rows = []
-
-        for feat in layer.getFeatures():
-            codice = feat[class_field]
-            descrizione = feat[desc_field]
-
-            rows.append(
-                {
-                    "codice_dusaf": "" if codice is None else str(codice),
-                    "descrizione": "" if descrizione is None else str(descrizione),
-                    "area_m2": float(feat["area_m2"]),
-                    "area_ha": float(feat["area_ha"]),
-                    "pct_dusaf": float(feat["pct_dusaf"]),
-                    "pct_comune": float(feat["pct_comune"]),
-                }
-            )
-
-        rows.sort(key=lambda row: row["area_ha"], reverse=True)
-
-        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "codice_dusaf",
-                    "descrizione",
-                    "area_m2",
-                    "area_ha",
-                    "pct_dusaf",
-                    "pct_comune",
-                ],
-                delimiter=";",
-            )
-
-            writer.writeheader()
-
-            for row in rows:
-                writer.writerow(
-                    {
-                        "codice_dusaf": row["codice_dusaf"],
-                        "descrizione": row["descrizione"],
-                        "area_m2": round(row["area_m2"], 3),
-                        "area_ha": round(row["area_ha"], 6),
-                        "pct_dusaf": round(row["pct_dusaf"], 6),
-                        "pct_comune": round(row["pct_comune"], 6),
-                    }
-                )
-
-        self._msg(feedback, f"[OK] CSV esportato: {csv_path}")
 
     # -------------------------------------------------------------------------
     # MAIN
@@ -1368,7 +960,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, f"[OK] Cartella output: {output_dir}")
         self._msg(feedback, f"[OK] Cartella stili progetto: {style_dir}")
         self._msg(feedback, f"[OK] Cartella stili plugin: {plugin_style_dir}")
-        self._msg(feedback, f"[OK] CRS operativo: {TARGET_CRS.authid()}")
+        self._msg(feedback, f"[OK] CRS operativo: {target_crs().authid()}")
         self._msg(feedback, f"[OK] Campo codice DUSAF fisso: {DUSAF_CLASS_FIELD}")
         self._msg(feedback, f"[OK] Campo descrizione DUSAF fisso: {DUSAF_DESC_FIELD}")
         self._msg(feedback, f"[OK] Soglia slivers: <= {sliver_min_area_m2} m²")
@@ -1383,7 +975,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             )
 
         for layer in [dusaf, comuni]:
-            total, invalid, empty = self._count_invalid_geometries(layer)
+            total, invalid, empty = qc.count_invalid_geometries(layer)
             self._msg(
                 feedback,
                 f"[QC INPUT] {layer.name()} | feature: {total} | invalid: {invalid} | empty: {empty}",
@@ -1411,8 +1003,8 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 1 - Fix geometries input")
         self._msg(feedback, "------------------------------------------------------")
 
-        dusaf_fix_pre = self._fix_geometries(dusaf, context, feedback, "DUSAF7_fix_pre")
-        comuni_fix_pre = self._fix_geometries(comuni, context, feedback, "Comuni_ISTAT_fix_pre")
+        dusaf_fix_pre = pipeline.fix_geometries(dusaf, context, feedback, "DUSAF7_fix_pre")
+        comuni_fix_pre = pipeline.fix_geometries(comuni, context, feedback, "Comuni_ISTAT_fix_pre")
 
         feedback.setProgress(20)
 
@@ -1420,11 +1012,11 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 2 - Riproiezione in EPSG:32632")
         self._msg(feedback, "------------------------------------------------------")
 
-        dusaf_32632 = self._reproject(dusaf_fix_pre, context, feedback, "DUSAF7_EPSG32632")
-        comuni_32632 = self._reproject(comuni_fix_pre, context, feedback, "Comuni_ISTAT_EPSG32632")
+        dusaf_32632 = pipeline.reproject(dusaf_fix_pre, target_crs(), context, feedback, "DUSAF7_EPSG32632")
+        comuni_32632 = pipeline.reproject(comuni_fix_pre, target_crs(), context, feedback, "Comuni_ISTAT_EPSG32632")
 
-        dusaf_32632_fix = self._fix_geometries(dusaf_32632, context, feedback, "DUSAF7_EPSG32632_fix")
-        comuni_32632_fix = self._fix_geometries(comuni_32632, context, feedback, "Comuni_ISTAT_EPSG32632_fix")
+        dusaf_32632_fix = pipeline.fix_geometries(dusaf_32632, context, feedback, "DUSAF7_EPSG32632_fix")
+        comuni_32632_fix = pipeline.fix_geometries(comuni_32632, context, feedback, "Comuni_ISTAT_EPSG32632_fix")
 
         feedback.setProgress(35)
 
@@ -1452,7 +1044,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 "Il filtro userà solo il nome del Comune; verificare eventuali omonimie fuori Lombardia.",
             )
 
-        comune_extract = self._extract_by_expression(
+        comune_extract = pipeline.extract_by_expression(
             comuni_32632_fix,
             comune_expr,
             context,
@@ -1472,21 +1064,21 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 "Verranno dissolte in un unico perimetro. Verificare eventuali omonimie.",
             )
 
-        comune_diss = self._dissolve_all(
+        comune_diss = pipeline.dissolve_all(
             comune_extract,
             context,
             feedback,
             f"Confine_{safe_comune}_dissolve",
         )
 
-        comune_fix = self._fix_geometries(
+        comune_fix = pipeline.fix_geometries(
             comune_diss,
             context,
             feedback,
             f"Confine_{safe_comune}_fix",
         )
 
-        boundary_area_m2 = self._total_area_m2(comune_fix)
+        boundary_area_m2 = qc.total_area_m2(comune_fix)
         boundary_area_ha = boundary_area_m2 / 10000.0
 
         self._msg(feedback, f"[QC] Superficie perimetro comunale originale: {boundary_area_ha:.6f} ha")
@@ -1500,7 +1092,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 4 - Clip DUSAF sul Comune")
         self._msg(feedback, "------------------------------------------------------")
 
-        dusaf_clip = self._clip(
+        dusaf_clip = pipeline.clip(
             dusaf_32632_fix,
             comune_fix,
             context,
@@ -1514,21 +1106,21 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 "Verificare CRS, sovrapposizione geografica e layer di input."
             )
 
-        dusaf_clip_fix = self._fix_geometries(
+        dusaf_clip_fix = pipeline.fix_geometries(
             dusaf_clip,
             context,
             feedback,
             f"DUSAF7_clip_{safe_comune}_fix",
         )
 
-        dusaf_clip_single = self._multipart_to_singleparts(
+        dusaf_clip_single = pipeline.multipart_to_singleparts(
             dusaf_clip_fix,
             context,
             feedback,
             f"DUSAF7_clip_{safe_comune}_singlepart",
         )
 
-        dusaf_clip_single_fix = self._fix_geometries(
+        dusaf_clip_single_fix = pipeline.fix_geometries(
             dusaf_clip_single,
             context,
             feedback,
@@ -1541,7 +1133,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 5 - Calcolo aree preliminari e slivers")
         self._msg(feedback, "------------------------------------------------------")
 
-        dusaf_clip_qc = self._add_area_fields(
+        dusaf_clip_qc = qc.add_area_fields(
             dusaf_clip_single_fix,
             sliver_min_area_m2=sliver_min_area_m2,
             include_sliver=True,
@@ -1562,7 +1154,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             f"feature sliver: {sliver_count} | area sliver: {sliver_area_m2:.6f} m²",
         )
 
-        slivers_layer = self._extract_by_expression(
+        slivers_layer = pipeline.extract_by_expression(
             dusaf_clip_qc,
             '"sliver" = 1',
             context,
@@ -1576,7 +1168,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 6 - Dissolve per classe DUSAF")
         self._msg(feedback, "------------------------------------------------------")
 
-        dusaf_diss = self._dissolve_by_fields(
+        dusaf_diss = pipeline.dissolve_by_fields(
             dusaf_clip_qc,
             [class_field, desc_field],
             context,
@@ -1584,17 +1176,17 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             f"DUSAF7_{safe_comune}_dissolve_by_class",
         )
 
-        dusaf_diss_fix = self._fix_geometries(
+        dusaf_diss_fix = pipeline.fix_geometries(
             dusaf_diss,
             context,
             feedback,
             f"DUSAF7_{safe_comune}_dissolve_by_class_fix",
         )
 
-        total_dusaf_m2 = self._total_area_m2(dusaf_diss_fix)
+        total_dusaf_m2 = qc.total_area_m2(dusaf_diss_fix)
         total_dusaf_ha = total_dusaf_m2 / 10000.0
 
-        dusaf_final = self._add_area_fields(
+        dusaf_final = qc.add_area_fields(
             dusaf_diss_fix,
             total_dusaf_m2=total_dusaf_m2,
             boundary_area_m2=boundary_area_m2,
@@ -1659,7 +1251,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 8 - Salvataggio output")
         self._msg(feedback, "------------------------------------------------------")
 
-        self._save_layer_to_gpkg(
+        output.save_layer_to_gpkg(
             dusaf_final,
             gpkg_path,
             f"dusaf7_{safe_comune}_superfici",
@@ -1668,7 +1260,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             feedback=feedback,
         )
 
-        self._save_layer_to_gpkg(
+        output.save_layer_to_gpkg(
             dusaf_clip_qc,
             gpkg_path,
             f"dusaf7_{safe_comune}_clip_qc",
@@ -1677,7 +1269,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             feedback=feedback,
         )
 
-        self._save_layer_to_gpkg(
+        output.save_layer_to_gpkg(
             comune_fix,
             gpkg_path,
             f"confine_{safe_comune}_fix",
@@ -1687,7 +1279,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         )
 
         if slivers_layer.featureCount() > 0:
-            self._save_layer_to_gpkg(
+            output.save_layer_to_gpkg(
                 slivers_layer,
                 gpkg_path,
                 f"qc_slivers_{safe_comune}",
@@ -1696,7 +1288,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 feedback=feedback,
             )
 
-        self._export_summary_csv(
+        output.export_summary_csv(
             dusaf_final,
             class_field,
             desc_field,
@@ -1710,39 +1302,43 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 9 - Caricamento output nel progetto e stili QML")
         self._msg(feedback, "------------------------------------------------------")
 
-        self._add_saved_layer_to_project(
+        output.add_saved_layer_to_project(
             gpkg_path,
             f"dusaf7_{safe_comune}_superfici",
             f"DUSAF7 {comune_name} - superfici ha %",
             feedback,
+            plugin_dir=PLUGIN_DIR,
             project_dir=project_dir,
             style_filename=STYLE_DUSAF_FINAL,
         )
 
-        self._add_saved_layer_to_project(
+        output.add_saved_layer_to_project(
             gpkg_path,
             f"dusaf7_{safe_comune}_clip_qc",
             f"DUSAF7 {comune_name} - clip QC",
             feedback,
+            plugin_dir=PLUGIN_DIR,
             project_dir=project_dir,
             style_filename=STYLE_DUSAF_CLIP_QC,
         )
 
-        self._add_saved_layer_to_project(
+        output.add_saved_layer_to_project(
             gpkg_path,
             f"confine_{safe_comune}_fix",
             f"Confine {comune_name} fix",
             feedback,
+            plugin_dir=PLUGIN_DIR,
             project_dir=project_dir,
             style_filename=STYLE_CONFINE,
         )
 
         if slivers_layer.featureCount() > 0:
-            self._add_saved_layer_to_project(
+            output.add_saved_layer_to_project(
                 gpkg_path,
                 f"qc_slivers_{safe_comune}",
                 f"QC slivers DUSAF7 {comune_name}",
                 feedback,
+                plugin_dir=PLUGIN_DIR,
                 project_dir=project_dir,
                 style_filename=STYLE_SLIVERS,
             )
