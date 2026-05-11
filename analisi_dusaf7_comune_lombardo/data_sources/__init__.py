@@ -18,7 +18,10 @@ directories, and does not touch the QGIS project state.
 from .cache_manager import CacheManager
 from .istat_boundaries_client import IstatBoundariesClient
 from .layer_factory import geojson_features_to_memory_layer
-from .lombardia_comuni_client import LombardiaComuniClient
+from .lombardia_comuni_client import (
+    LombardiaComuniClient,
+    normalize_comune_display_name,
+)
 from .lombardia_dusaf_client import LombardiaDusafClient
 
 __all__ = [
@@ -27,4 +30,5 @@ __all__ = [
     "LombardiaComuniClient",
     "LombardiaDusafClient",
     "geojson_features_to_memory_layer",
+    "normalize_comune_display_name",
 ]

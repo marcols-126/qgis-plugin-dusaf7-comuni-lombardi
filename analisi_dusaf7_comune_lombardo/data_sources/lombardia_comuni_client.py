@@ -207,6 +207,63 @@ def validate_comune_name(value):
     return text
 
 
+_TITLE_LOWERCASE_TOKENS = frozenset(
+    {"di", "da", "del", "della", "dei", "delle", "degli", "in", "su", "sul",
+     "sulla", "e", "al", "alla", "ai", "alle", "agli", "con", "per"}
+)
+
+_APOSTROPHE_LOWERCASE_HEADS = frozenset(
+    {"d", "l", "all", "dall", "dell", "nell", "sull", "un"}
+)
+
+
+def normalize_comune_display_name(value):
+    """Return a human-friendly form of a RL service municipality name.
+
+    The Lombardia ArcGIS REST service serves ``NOME_COM`` in uppercase. For
+    the user interface (autocomplete, alerts, logs) we want the conventional
+    title-case form. Handled cases:
+
+    - ``ZIBIDO SAN GIACOMO`` -> ``Zibido San Giacomo``
+    - ``SAN GIORGIO SU LEGNANO`` -> ``San Giorgio su Legnano`` (linking
+      preposition ``su`` stays lowercase when not the first word)
+    - ``CASSANO D'ADDA`` -> ``Cassano d'Adda`` (preposition ``d'`` stays
+      lowercase mid-name, but the following toponym is capitalised)
+    - ``L'AQUILA`` -> ``L'Aquila`` (apostrophe head stays capitalised when
+      it is the first word of the name)
+    """
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+    if not text:
+        return text
+
+    parts = []
+    for index, word in enumerate(text.split()):
+        if not word:
+            continue
+
+        word_lower = word.lower()
+
+        if "'" in word:
+            head, tail = word.split("'", 1)
+            head_lower = head.lower()
+            tail_converted = tail.capitalize()
+            if index > 0 and head_lower in _APOSTROPHE_LOWERCASE_HEADS:
+                converted = head_lower + "'" + tail_converted
+            else:
+                converted = head.capitalize() + "'" + tail_converted
+        elif index > 0 and word_lower in _TITLE_LOWERCASE_TOKENS:
+            converted = word_lower
+        else:
+            converted = word.capitalize()
+
+        parts.append(converted)
+
+    return " ".join(parts)
+
+
 def _quote_sql_string(value):
     """Quote a value for inclusion in an ArcGIS REST ``where`` clause."""
     return "'" + str(value).replace("'", "''") + "'"
@@ -516,12 +573,21 @@ class LombardiaComuniClient:
         return ArcGisQuerySpec(url=f"{self.layer_url}/query", params=params)
 
     def build_geometry_query_spec_by_name(self, comune_name, out_fields=None):
-        """Build a query by exact Comune name (case-sensitive on ArcGIS)."""
+        """Build a query by Comune name with case-insensitive matching.
+
+        The RL service stores ``NOME_COM`` in uppercase but the user-facing UI
+        (and ISTAT) use mixed case. We compare ``UPPER(NOME_COM)`` against the
+        uppercased input so the same builder works regardless of how the
+        caller spelled the name.
+        """
         comune_name = validate_comune_name(comune_name)
 
         params = {
             "f": COMUNI_QUERY_FORMAT,
-            "where": f"{self.name_field} = {_quote_sql_string(comune_name)}",
+            "where": "UPPER({}) = {}".format(
+                self.name_field,
+                _quote_sql_string(comune_name.upper()),
+            ),
             "outFields": validate_out_fields(out_fields),
             "returnGeometry": "true",
             "outSR": str(COMUNI_EXPECTED_CRS_WKID),
