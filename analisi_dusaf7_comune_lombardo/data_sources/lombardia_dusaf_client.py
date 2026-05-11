@@ -24,6 +24,23 @@ DUSAF_DEFAULT_PAGE_SIZE = 1000
 DUSAF_MIN_PAGE_SIZE = 1
 DUSAF_MAX_PAGE_SIZE = 1000
 DUSAF_QUERY_FORMAT = "geojson"
+DUSAF_ENVELOPE_KEYS = ("xmin", "ymin", "xmax", "ymax")
+
+
+def _coerce_number(value, label):
+    """Return a finite numeric value for validation-only helpers."""
+    if isinstance(value, bool):
+        raise ValueError(f"DUSAF {label} must be numeric, not a boolean value.")
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"DUSAF {label} must be numeric.") from None
+
+    if number != number or number in (float("inf"), float("-inf")):
+        raise ValueError(f"DUSAF {label} must be a finite numeric value.")
+
+    return number
 
 
 def validate_page_size(page_size):
@@ -66,6 +83,127 @@ def validate_offset(offset):
         raise ValueError("DUSAF offset must be greater than or equal to zero.")
 
     return value
+
+
+def validate_envelope_32632(envelope):
+    """Validate and return an ArcGIS envelope in EPSG:32632.
+
+    The accepted inputs are a dict with ``xmin``, ``ymin``, ``xmax`` and
+    ``ymax`` keys, or a four-item sequence in the same order. The function does
+    not check Lombardia bounds; it only ensures a sane projected envelope.
+    """
+    if isinstance(envelope, dict):
+        missing = [key for key in DUSAF_ENVELOPE_KEYS if key not in envelope]
+        if missing:
+            raise ValueError("DUSAF envelope is missing keys: {}.".format(", ".join(missing)))
+        values = [envelope[key] for key in DUSAF_ENVELOPE_KEYS]
+    else:
+        try:
+            values = list(envelope)
+        except TypeError:
+            raise ValueError("DUSAF envelope must be a dict or a four-item sequence.") from None
+
+        if len(values) != 4:
+            raise ValueError("DUSAF envelope sequence must contain exactly four values.")
+
+    xmin, ymin, xmax, ymax = [
+        _coerce_number(value, key) for value, key in zip(values, DUSAF_ENVELOPE_KEYS)
+    ]
+
+    if xmin >= xmax:
+        raise ValueError("DUSAF envelope xmin must be smaller than xmax.")
+
+    if ymin >= ymax:
+        raise ValueError("DUSAF envelope ymin must be smaller than ymax.")
+
+    return {
+        "xmin": xmin,
+        "ymin": ymin,
+        "xmax": xmax,
+        "ymax": ymax,
+        "spatialReference": {"wkid": 32632},
+    }
+
+
+def validate_out_fields(out_fields):
+    """Validate and return ArcGIS outFields as a comma-separated string."""
+    if out_fields is None:
+        return "*"
+
+    if isinstance(out_fields, str):
+        fields = [field.strip() for field in out_fields.split(",")]
+    else:
+        try:
+            fields = []
+            for field in out_fields:
+                if isinstance(field, bool):
+                    raise ValueError("DUSAF out_fields values must be strings, not booleans.")
+                fields.append(str(field).strip())
+        except TypeError:
+            raise ValueError("DUSAF out_fields must be None, a string, or an iterable.") from None
+
+    fields = [field for field in fields if field]
+
+    if not fields:
+        raise ValueError("DUSAF out_fields must not be empty.")
+
+    if "*" in fields:
+        if len(fields) != 1:
+            raise ValueError("DUSAF out_fields '*' cannot be combined with named fields.")
+        return "*"
+
+    for field in fields:
+        if not field.replace("_", "").isalnum():
+            raise ValueError(f"Unsafe DUSAF out_field name: {field}.")
+
+    return ",".join(fields)
+
+
+def validate_arcgis_json_response(response_json):
+    """Validate an ArcGIS JSON/GeoJSON response already loaded in memory."""
+    if not isinstance(response_json, dict):
+        raise ValueError("DUSAF ArcGIS response must be a dictionary.")
+
+    if "error" in response_json:
+        error = response_json["error"]
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("details") or error
+        else:
+            message = error
+        raise ValueError(f"DUSAF ArcGIS response contains an error: {message}.")
+
+    if "features" in response_json and not isinstance(response_json["features"], list):
+        raise ValueError("DUSAF ArcGIS response field 'features' must be a list.")
+
+    return response_json
+
+
+def response_has_features(response_json):
+    """Return True when a validated ArcGIS response contains at least one feature."""
+    response_json = validate_arcgis_json_response(response_json)
+    return bool(response_json.get("features"))
+
+
+def response_exceeded_transfer_limit(response_json):
+    """Return True when ArcGIS reports that the transfer limit was exceeded."""
+    response_json = validate_arcgis_json_response(response_json)
+    return bool(response_json.get("exceededTransferLimit"))
+
+
+def next_offset(response_json, current_offset, page_size):
+    """Return the next prudent pagination offset, or None when paging can stop."""
+    response_json = validate_arcgis_json_response(response_json)
+    current_offset = validate_offset(current_offset)
+    page_size = validate_page_size(page_size)
+    feature_count = len(response_json.get("features") or [])
+
+    if feature_count == 0:
+        return None
+
+    if response_exceeded_transfer_limit(response_json) or feature_count >= page_size:
+        return current_offset + feature_count
+
+    return None
 
 
 @dataclass(frozen=True)
@@ -129,7 +267,7 @@ class LombardiaDusafClient:
         params = {
             "f": DUSAF_QUERY_FORMAT,
             "where": "1=1",
-            "outFields": ",".join(out_fields) if out_fields else "*",
+            "outFields": validate_out_fields(out_fields),
             "returnGeometry": "true",
             "resultRecordCount": self.page_size,
             "resultOffset": validate_offset(offset),
@@ -137,6 +275,7 @@ class LombardiaDusafClient:
         }
 
         if geometry is not None:
+            geometry = validate_envelope_32632(geometry)
             params.update(
                 {
                     "geometry": geometry,
