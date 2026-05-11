@@ -8,6 +8,7 @@ not download files, parse remote pages, or touch the QGIS project when imported.
 
 import os
 import shutil
+import zipfile
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
@@ -24,6 +25,7 @@ ISTAT_EXPECTED_LAYER_NAME = "Com01012026_WGS84"
 ISTAT_EXPECTED_CRS_AUTHID = "EPSG:32632"
 ISTAT_BOUNDARIES_2026_ZIP_URL = None
 ISTAT_DOWNLOAD_TIMEOUT_SECONDS = 60
+ISTAT_REQUIRED_SHAPEFILE_EXTENSIONS = (".shp", ".dbf", ".shx", ".prj")
 ISTAT_REGION_CODE_FIELD = "COD_REG"
 ISTAT_REGION_CODE_LOMBARDIA = 3
 ISTAT_MUNICIPALITY_FIELD_CANDIDATES = (
@@ -109,6 +111,177 @@ def validate_archive_destination_path(destination_path):
         )
 
     return path
+
+
+def validate_existing_archive_path(archive_path):
+    """Validate and return an existing local ISTAT ZIP archive path.
+
+    The function performs no extraction. It verifies that the path exists,
+    points to a regular ``.zip`` file, and can be opened as a ZIP archive.
+    """
+    if not isinstance(archive_path, str) or not archive_path.strip():
+        raise ValueError("ISTAT archive_path must be a non-empty string.")
+
+    path = os.path.abspath(archive_path.strip())
+
+    if not os.path.exists(path):
+        raise FileNotFoundError("ISTAT archive does not exist: {}.".format(path))
+
+    if not os.path.isfile(path):
+        raise ValueError("ISTAT archive path is not a file: {}.".format(path))
+
+    if not path.lower().endswith(".zip"):
+        raise ValueError("ISTAT archive path must point to a .zip file: {}.".format(path))
+
+    if not zipfile.is_zipfile(path):
+        raise ValueError("ISTAT archive is not a readable ZIP file: {}.".format(path))
+
+    return path
+
+
+def validate_extract_destination_dir(destination_dir):
+    """Validate and return an existing destination directory for extraction."""
+    if not isinstance(destination_dir, str) or not destination_dir.strip():
+        raise ValueError("ISTAT extract destination_dir must be a non-empty string.")
+
+    path = os.path.abspath(destination_dir.strip())
+
+    if not os.path.isdir(path):
+        raise ValueError("ISTAT extract destination_dir does not exist: {}.".format(path))
+
+    return path
+
+
+def validate_zip_member_name(member_name):
+    """Validate one ZIP member name against path traversal risks."""
+    if not isinstance(member_name, str) or not member_name.strip():
+        raise ValueError("ISTAT ZIP contains an empty member name.")
+
+    normalized = member_name.replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part]
+
+    if normalized.startswith("/") or os.path.isabs(member_name):
+        raise ValueError("Unsafe ISTAT ZIP member uses an absolute path: {}.".format(member_name))
+
+    if ".." in parts:
+        raise ValueError("Unsafe ISTAT ZIP member contains '..': {}.".format(member_name))
+
+    return normalized
+
+
+def list_archive_files(archive_path):
+    """Return validated non-directory file names contained in an ISTAT ZIP.
+
+    Raises:
+        ValueError: If the archive is invalid or contains unsafe member names.
+    """
+    archive_path = validate_existing_archive_path(archive_path)
+    files = []
+
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            for info in archive.infolist():
+                member_name = validate_zip_member_name(info.filename)
+                if info.is_dir() or member_name.endswith("/"):
+                    continue
+                files.append(member_name)
+    except zipfile.BadZipFile as exc:
+        raise ValueError("ISTAT archive is corrupt or unreadable: {}.".format(archive_path)) from exc
+
+    return files
+
+
+def find_shapefile_components(archive_path, layer_name=ISTAT_EXPECTED_LAYER_NAME):
+    """Inspect an ISTAT ZIP for expected shapefile component files.
+
+    Returns a dictionary with ``present``, ``missing``, and ``files`` keys.
+    Matching is case-insensitive and accepts components in nested safe folders.
+    """
+    layer_name = validate_expected_layer_name(layer_name)
+    archive_files = list_archive_files(archive_path)
+    expected = {
+        extension: "{}{}".format(layer_name, extension).lower()
+        for extension in ISTAT_REQUIRED_SHAPEFILE_EXTENSIONS
+    }
+    present = {}
+
+    for archive_file in archive_files:
+        basename = os.path.basename(archive_file).lower()
+        for extension, expected_name in expected.items():
+            if basename == expected_name:
+                present[extension] = archive_file
+
+    missing = [
+        extension for extension in ISTAT_REQUIRED_SHAPEFILE_EXTENSIONS
+        if extension not in present
+    ]
+
+    return {
+        "present": present,
+        "missing": missing,
+        "files": archive_files,
+    }
+
+
+def validate_required_shapefile_components(archive_path, layer_name=ISTAT_EXPECTED_LAYER_NAME):
+    """Raise a clear error if required shapefile components are missing."""
+    components = find_shapefile_components(archive_path, layer_name=layer_name)
+
+    if components["missing"]:
+        raise ValueError(
+            "ISTAT archive is missing required shapefile components for '{}': {}.".format(
+                layer_name,
+                ", ".join(components["missing"]),
+            )
+        )
+
+    return components
+
+
+def extract_archive(archive_path, destination_dir):
+    """Extract an ISTAT ZIP into an existing directory after safety checks.
+
+    The function blocks absolute paths and ``..`` traversal entries before
+    extraction. It does not convert shapefiles or alter QGIS project state.
+    """
+    archive_path = validate_existing_archive_path(archive_path)
+    destination_dir = validate_extract_destination_dir(destination_dir)
+    extracted_paths = []
+
+    try:
+        with zipfile.ZipFile(archive_path, "r") as archive:
+            members = archive.infolist()
+            for info in members:
+                validate_zip_member_name(info.filename)
+
+            destination_root = os.path.abspath(destination_dir)
+
+            for info in members:
+                member_name = validate_zip_member_name(info.filename)
+                target_path = os.path.abspath(os.path.join(destination_root, member_name))
+
+                if target_path != destination_root and not target_path.startswith(destination_root + os.sep):
+                    raise ValueError(
+                        "Unsafe ISTAT ZIP member would extract outside destination: {}.".format(
+                            info.filename
+                        )
+                    )
+
+                if info.is_dir():
+                    os.makedirs(target_path, exist_ok=True)
+                    continue
+
+                os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+                with archive.open(info, "r") as source, open(target_path, "wb") as target:
+                    shutil.copyfileobj(source, target)
+
+                extracted_paths.append(target_path)
+
+    except zipfile.BadZipFile as exc:
+        raise ValueError("ISTAT archive is corrupt or unreadable: {}.".format(archive_path)) from exc
+
+    return extracted_paths
 
 
 def validate_download_url(download_url):
@@ -278,3 +451,19 @@ class IstatBoundariesClient:
                 except OSError:
                     pass
             raise
+
+    def list_archive_files(self, archive_path):
+        """Return safe file names from a previously downloaded ISTAT ZIP."""
+        return list_archive_files(archive_path)
+
+    def find_shapefile_components(self, archive_path):
+        """Inspect a ZIP for expected ISTAT shapefile components."""
+        return find_shapefile_components(archive_path, self.expected_layer_name)
+
+    def validate_required_shapefile_components(self, archive_path):
+        """Validate that a ZIP contains .shp, .dbf, .shx and .prj files."""
+        return validate_required_shapefile_components(archive_path, self.expected_layer_name)
+
+    def extract_archive(self, archive_path, destination_dir):
+        """Extract a previously downloaded ISTAT ZIP after safety checks."""
+        return extract_archive(archive_path, destination_dir)
