@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
+from .cache_manager import ISTAT_CACHE_FOLDER
+
 
 ISTAT_BOUNDARIES_PAGE_URL = (
     "https://www.istat.it/notizia/"
@@ -26,6 +28,7 @@ ISTAT_EXPECTED_CRS_AUTHID = "EPSG:32632"
 ISTAT_BOUNDARIES_2026_ZIP_URL = None
 ISTAT_DOWNLOAD_TIMEOUT_SECONDS = 60
 ISTAT_REQUIRED_SHAPEFILE_EXTENSIONS = (".shp", ".dbf", ".shx", ".prj")
+ISTAT_EXTRACTED_FOLDER_NAME = "extracted_2026"
 ISTAT_REGION_CODE_FIELD = "COD_REG"
 ISTAT_REGION_CODE_LOMBARDIA = 3
 ISTAT_MUNICIPALITY_FIELD_CANDIDATES = (
@@ -386,6 +389,31 @@ def resolve_valid_extracted_shapefile(extracted_dir, layer_name=ISTAT_EXPECTED_L
     return shp_path
 
 
+def build_local_package_manifest_entry(
+    archive_path,
+    extract_dir,
+    shapefile_path,
+    component_paths,
+    client,
+):
+    """Build manifest metadata for a prepared local ISTAT boundary package."""
+    return {
+        "source": client.landing_page_url,
+        "reference_year": client.reference_year,
+        "dataset_type": client.dataset_type,
+        "expected_crs_label": client.expected_crs_label,
+        "expected_crs_authid": client.expected_crs_authid,
+        "expected_layer_name": client.expected_layer_name,
+        "archive_path": os.path.abspath(archive_path),
+        "extract_dir": os.path.abspath(extract_dir),
+        "shapefile_path": os.path.abspath(shapefile_path),
+        "components": {
+            extension: os.path.abspath(path)
+            for extension, path in sorted(component_paths.items())
+        },
+    }
+
+
 def validate_download_url(download_url):
     """Validate and return a configured ISTAT archive HTTPS URL."""
     if not isinstance(download_url, str) or not download_url.strip():
@@ -581,3 +609,66 @@ class IstatBoundariesClient:
     def resolve_valid_extracted_shapefile(self, extracted_dir):
         """Return a valid extracted ISTAT .shp path without loading it in QGIS."""
         return resolve_valid_extracted_shapefile(extracted_dir, self.expected_layer_name)
+
+    def prepare_local_package(self, archive_path, cache_manager, overwrite=False):
+        """Prepare and register a local ISTAT package from an existing ZIP.
+
+        This method performs only local filesystem work when called explicitly:
+        it validates the ZIP, creates the ISTAT cache directory, extracts the
+        archive into a controlled subdirectory, validates the expected
+        shapefile sidecar files, and updates the cache manifest. It does not
+        download data, load QGIS layers, read attributes, or convert formats.
+        """
+        if cache_manager is None:
+            raise ValueError("cache_manager is required to prepare a local ISTAT package.")
+
+        archive_path = validate_existing_archive_path(archive_path)
+        validate_required_shapefile_components(archive_path, self.expected_layer_name)
+
+        dataset_dir = cache_manager.ensure_dataset_dir(ISTAT_CACHE_FOLDER)
+        dataset_dir = os.path.abspath(dataset_dir)
+        extract_dir = os.path.join(dataset_dir, ISTAT_EXTRACTED_FOLDER_NAME)
+
+        if not extract_dir.startswith(dataset_dir + os.sep):
+            raise ValueError(
+                "ISTAT extraction directory is outside the dataset cache directory: {}.".format(
+                    extract_dir
+                )
+            )
+
+        if os.path.exists(extract_dir):
+            if not overwrite:
+                raise FileExistsError(
+                    "ISTAT extraction directory already exists and overwrite=False: {}.".format(
+                        extract_dir
+                    )
+                )
+            if not os.path.isdir(extract_dir):
+                raise ValueError(
+                    "ISTAT extraction target exists but is not a directory: {}.".format(
+                        extract_dir
+                    )
+                )
+            shutil.rmtree(extract_dir)
+
+        os.makedirs(extract_dir, exist_ok=True)
+        extract_archive(archive_path, extract_dir)
+
+        shapefile_path = resolve_valid_extracted_shapefile(
+            extract_dir,
+            self.expected_layer_name,
+        )
+        component_paths = validate_extracted_shapefile_components(shapefile_path)
+
+        manifest = cache_manager.read_manifest()
+        datasets = manifest.setdefault("datasets", {})
+        datasets[ISTAT_CACHE_FOLDER] = build_local_package_manifest_entry(
+            archive_path=archive_path,
+            extract_dir=extract_dir,
+            shapefile_path=shapefile_path,
+            component_paths=component_paths,
+            client=self,
+        )
+        cache_manager.write_manifest(manifest)
+
+        return datasets[ISTAT_CACHE_FOLDER]
