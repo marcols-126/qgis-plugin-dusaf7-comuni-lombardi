@@ -534,3 +534,36 @@ class LombardiaDusafClient:
             current_offset = new_offset
 
         return features
+
+    def fetch_validated_features(
+        self,
+        geometry=None,
+        out_fields=None,
+        start_offset=0,
+        max_pages=None,
+        max_features=None,
+        timeout=60,
+        callback=None,
+        feedback=None,
+    ):
+        """Fetch DUSAF features and validate their geometry and attributes.
+
+        This is a conservative wrapper around ``fetch_features``. It keeps the
+        raw method available, writes no files, creates no directories, and does
+        not interact with QGIS Processing.
+        """
+        features = self.fetch_features(
+            geometry=geometry,
+            out_fields=out_fields,
+            start_offset=start_offset,
+            max_pages=max_pages,
+            max_features=max_features,
+            timeout=timeout,
+            callback=callback,
+            feedback=feedback,
+        )
+
+        try:
+            return validate_dusaf_features(features)
+        except ValueError as exc:
+            raise ValueError("DUSAF validated fetch returned invalid features: {}.".format(exc)) from exc
