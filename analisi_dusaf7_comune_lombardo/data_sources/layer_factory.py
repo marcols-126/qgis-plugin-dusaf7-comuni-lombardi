@@ -9,8 +9,6 @@ no project state is altered: the produced layers live entirely in memory and
 the caller decides whether to add them to the project.
 """
 
-import json
-
 from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsFeature,
@@ -34,6 +32,74 @@ _GEOMETRY_TYPE_BY_GEOJSON = {
     "Polygon": "Polygon",
     "MultiPolygon": "MultiPolygon",
 }
+
+
+def _format_xy(coord):
+    """Format a single GeoJSON coordinate as ``"x y"`` (Z and M are dropped)."""
+    if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+        raise ValueError(f"GeoJSON coordinate must be a list of at least 2 numbers, got: {coord!r}")
+    return "{} {}".format(coord[0], coord[1])
+
+
+def _geojson_geometry_to_wkt(geometry):
+    """Translate a GeoJSON geometry dict into a WKT string.
+
+    Supports the six core GeoJSON geometry types (Point, MultiPoint,
+    LineString, MultiLineString, Polygon, MultiPolygon). Z/M coordinate
+    extensions are silently dropped because the workflow only needs planar
+    operations in EPSG:32632. This avoids depending on ``QgsGeometry.fromJson``
+    whose semantics differ between QGIS releases (ArcGIS-style JSON vs GeoJSON).
+    """
+    if not isinstance(geometry, dict):
+        raise ValueError("GeoJSON geometry must be a dictionary.")
+
+    geometry_type = geometry.get("type")
+    coords = geometry.get("coordinates")
+
+    if not isinstance(geometry_type, str):
+        raise ValueError("GeoJSON geometry is missing 'type'.")
+    if coords is None:
+        raise ValueError("GeoJSON geometry is missing 'coordinates'.")
+
+    if geometry_type == "Point":
+        return "POINT({})".format(_format_xy(coords))
+
+    if geometry_type == "MultiPoint":
+        return "MULTIPOINT({})".format(
+            ", ".join("({})".format(_format_xy(p)) for p in coords)
+        )
+
+    if geometry_type == "LineString":
+        return "LINESTRING({})".format(", ".join(_format_xy(p) for p in coords))
+
+    if geometry_type == "MultiLineString":
+        return "MULTILINESTRING({})".format(
+            ", ".join(
+                "({})".format(", ".join(_format_xy(p) for p in line)) for line in coords
+            )
+        )
+
+    if geometry_type == "Polygon":
+        return "POLYGON({})".format(
+            ", ".join(
+                "({})".format(", ".join(_format_xy(p) for p in ring)) for ring in coords
+            )
+        )
+
+    if geometry_type == "MultiPolygon":
+        return "MULTIPOLYGON({})".format(
+            ", ".join(
+                "({})".format(
+                    ", ".join(
+                        "({})".format(", ".join(_format_xy(p) for p in ring))
+                        for ring in poly
+                    )
+                )
+                for poly in coords
+            )
+        )
+
+    raise ValueError(f"Unsupported GeoJSON geometry type: {geometry_type}")
 
 
 def _infer_field_type(values):
@@ -197,12 +263,21 @@ def geojson_features_to_memory_layer(
 
     qgis_features = []
     for feature_index, (feature, row) in enumerate(zip(normalised, rows)):
-        geom_json = json.dumps(feature["geometry"])
-        qgs_geom = QgsGeometry.fromJson(geom_json) if hasattr(QgsGeometry, "fromJson") else None
-
-        if qgs_geom is None or qgs_geom.isNull() or qgs_geom.isEmpty():
+        try:
+            wkt = _geojson_geometry_to_wkt(feature["geometry"])
+        except ValueError as exc:
             raise ValueError(
-                "Feature at index {} produced an invalid QGIS geometry.".format(feature_index)
+                "Feature at index {} has invalid GeoJSON geometry: {}".format(
+                    feature_index, exc
+                )
+            ) from exc
+
+        qgs_geom = QgsGeometry.fromWkt(wkt)
+        if qgs_geom.isNull() or qgs_geom.isEmpty():
+            raise ValueError(
+                "Feature at index {} produced an invalid QGIS geometry (WKT length {}).".format(
+                    feature_index, len(wkt)
+                )
             )
 
         qgs_feat = QgsFeature(layer.fields())
