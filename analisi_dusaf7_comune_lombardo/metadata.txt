@@ -4,9 +4,10 @@
 
 [general]
 name=Analisi DUSAF 7 Comune Lombardo
-qgisMinimumVersion=3.40
-description=Analisi DUSAF 7 per Comuni lombardi con QC-4
-version=0.1.0
+qgisMinimumVersion=3.34
+qgisMaximumVersion=4.99
+description=Analisi DUSAF 7 per Comuni lombardi con QC-4 (compatibile Qt5/Qt6, dati da ArcGIS REST Regione Lombardia)
+version=0.2.0
 author=Marco Stefano La Sala
 email=214729081+marcols-126@users.noreply.github.com
 
