@@ -151,31 +151,104 @@ class CacheManager:
             istat_dir=os.path.join(root, ISTAT_CACHE_FOLDER),
         )
 
-    def ensure_directories(self):
-        """Create cache directories when explicitly called by future code."""
+    def ensure_base_dir(self):
+        """Create and return the base cache directory on explicit request.
+
+        No dataset subdirectory is created by this method. It is useful for
+        future workflows that only need to store top-level cache metadata such
+        as the manifest.
+        """
+        root = self.root_dir()
+        os.makedirs(root, exist_ok=True)
+        return root
+
+    def dataset_dir(self, dataset_key):
+        """Return the cache directory for a known dataset without creating it."""
+        dataset_key = validate_dataset_key(dataset_key)
         paths = self.paths()
-        os.makedirs(paths.dusaf_dir, exist_ok=True)
-        os.makedirs(paths.istat_dir, exist_ok=True)
+        folders = {
+            DUSAF_CACHE_FOLDER: paths.dusaf_dir,
+            ISTAT_CACHE_FOLDER: paths.istat_dir,
+        }
+        return folders[dataset_key]
+
+    def ensure_dataset_dir(self, dataset_key):
+        """Create and return one dataset cache directory on explicit request."""
+        dataset_dir = self.dataset_dir(dataset_key)
+        os.makedirs(dataset_dir, exist_ok=True)
+        return dataset_dir
+
+    def ensure_directories(self):
+        """Create all cache directories when explicitly called by future code.
+
+        This compatibility helper creates the base cache directory and all
+        known dataset directories. Importing this module never calls it.
+        """
+        paths = self.paths()
+        self.ensure_base_dir()
+        self.ensure_dataset_dir(DUSAF_CACHE_FOLDER)
+        self.ensure_dataset_dir(ISTAT_CACHE_FOLDER)
         return paths
 
     def read_manifest(self):
-        """Read cache metadata if present; return an empty dict otherwise."""
+        """Read and validate cache metadata from JSON.
+
+        Returns an empty dictionary when the manifest file does not exist.
+
+        Raises:
+            ValueError: If the manifest is not valid JSON, is not a dictionary,
+                or fails the in-memory manifest validation rules.
+        """
         manifest_path = self.paths().manifest_path
 
         if not os.path.exists(manifest_path):
             return {}
 
-        with open(manifest_path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Cache manifest is not valid JSON: {}.".format(manifest_path)
+            ) from exc
+        except OSError as exc:
+            raise ValueError(
+                "Cache manifest could not be read: {}.".format(manifest_path)
+            ) from exc
+
+        errors = validate_manifest_data(manifest)
+        if errors:
+            raise ValueError("Cache manifest is invalid: {}".format("; ".join(errors)))
+
+        return manifest
 
     def write_manifest(self, manifest):
-        """Write cache metadata after explicit directory creation."""
-        paths = self.ensure_directories()
+        """Validate and write cache metadata as ordered UTF-8 JSON.
 
-        with open(paths.manifest_path, "w", encoding="utf-8") as handle:
-            json.dump(manifest or {}, handle, ensure_ascii=True, indent=2, sort_keys=True)
+        The base cache directory is created only because this method is called
+        explicitly. Dataset subdirectories are not created by manifest writes.
 
-        return paths.manifest_path
+        Raises:
+            ValueError: If the manifest structure is invalid.
+            OSError: If the file cannot be written by the host environment.
+        """
+        manifest_data = {} if manifest is None else manifest
+        errors = validate_manifest_data(manifest_data)
+        if errors:
+            raise ValueError("Cache manifest is invalid: {}".format("; ".join(errors)))
+
+        self.ensure_base_dir()
+        manifest_path = self.paths().manifest_path
+
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest_data, handle, ensure_ascii=True, indent=2, sort_keys=True)
+            handle.write("\n")
+
+        return manifest_path
+
+    def dataset_exists(self, dataset_key):
+        """Return True when a known dataset cache directory already exists."""
+        return os.path.isdir(self.dataset_dir(dataset_key))
 
     def dataset_path(self, dataset_key, filename):
         """Return a path inside a known dataset cache folder.
