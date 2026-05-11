@@ -26,6 +26,10 @@ DUSAF_DESCRIPTION_FIELD = "DESCR"
 DUSAF_DEFAULT_PAGE_SIZE = 1000
 DUSAF_MIN_PAGE_SIZE = 1
 DUSAF_MAX_PAGE_SIZE = 1000
+DUSAF_DEFAULT_MAX_PAGES = 50
+DUSAF_MIN_MAX_PAGES = 1
+DUSAF_MAX_MAX_PAGES = 10000
+DUSAF_MIN_MAX_FEATURES = 1
 DUSAF_QUERY_FORMAT = "geojson"
 DUSAF_ENVELOPE_KEYS = ("xmin", "ymin", "xmax", "ymax")
 
@@ -84,6 +88,50 @@ def validate_offset(offset):
 
     if value < 0:
         raise ValueError("DUSAF offset must be greater than or equal to zero.")
+
+    return value
+
+
+def validate_max_pages(max_pages):
+    """Validate and return a prudent maximum number of ArcGIS pages."""
+    if isinstance(max_pages, bool):
+        raise ValueError("DUSAF max_pages must be an integer, not a boolean value.")
+
+    try:
+        value = int(max_pages)
+    except (TypeError, ValueError):
+        raise ValueError("DUSAF max_pages must be an integer.") from None
+
+    if value < DUSAF_MIN_MAX_PAGES or value > DUSAF_MAX_MAX_PAGES:
+        raise ValueError(
+            "DUSAF max_pages must be between {} and {}.".format(
+                DUSAF_MIN_MAX_PAGES,
+                DUSAF_MAX_MAX_PAGES,
+            )
+        )
+
+    return value
+
+
+def validate_max_features(max_features):
+    """Validate and return a maximum number of features to keep in memory."""
+    if max_features is None:
+        return None
+
+    if isinstance(max_features, bool):
+        raise ValueError("DUSAF max_features must be an integer, not a boolean value.")
+
+    try:
+        value = int(max_features)
+    except (TypeError, ValueError):
+        raise ValueError("DUSAF max_features must be an integer.") from None
+
+    if value < DUSAF_MIN_MAX_FEATURES:
+        raise ValueError(
+            "DUSAF max_features must be greater than or equal to {}.".format(
+                DUSAF_MIN_MAX_FEATURES
+            )
+        )
 
     return value
 
@@ -252,6 +300,8 @@ def _read_json_url(url, timeout):
         raise ValueError(f"DUSAF ArcGIS network error: {exc.reason}.") from exc
     except TimeoutError as exc:
         raise ValueError("DUSAF ArcGIS request timed out.") from exc
+    except OSError as exc:
+        raise ValueError(f"DUSAF ArcGIS I/O error: {exc}.") from exc
 
     try:
         return json.loads(payload)
@@ -333,6 +383,7 @@ class LombardiaDusafClient:
         out_fields=None,
         start_offset=0,
         max_pages=None,
+        max_features=None,
         timeout=60,
         callback=None,
         feedback=None,
@@ -349,15 +400,11 @@ class LombardiaDusafClient:
         if timeout <= 0:
             raise ValueError("DUSAF timeout must be greater than zero.")
 
-        if max_pages is not None:
-            if isinstance(max_pages, bool):
-                raise ValueError("DUSAF max_pages must be an integer, not a boolean value.")
-            try:
-                max_pages = int(max_pages)
-            except (TypeError, ValueError):
-                raise ValueError("DUSAF max_pages must be an integer.") from None
-            if max_pages <= 0:
-                raise ValueError("DUSAF max_pages must be greater than zero.")
+        if max_pages is None:
+            max_pages = DUSAF_DEFAULT_MAX_PAGES
+
+        max_pages = validate_max_pages(max_pages)
+        max_features = validate_max_features(max_features)
 
         features = []
         page_count = 0
@@ -369,8 +416,10 @@ class LombardiaDusafClient:
                 _notify(
                     callback=callback,
                     feedback=feedback,
-                    message="DUSAF fetch stopped at max_pages={}. ".format(max_pages)
-                    + "More features may be available.",
+                    message="DUSAF fetch stopped after reaching max_pages={}. ".format(max_pages)
+                    + "{} features collected; more features may be available.".format(
+                        len(features)
+                    ),
                 )
                 break
 
@@ -393,7 +442,33 @@ class LombardiaDusafClient:
                 raise ValueError("DUSAF ArcGIS response does not contain a 'features' field.")
 
             page_features = response_json["features"]
-            features.extend(page_features)
+            if max_features is not None:
+                remaining = max_features - len(features)
+                if remaining <= 0:
+                    _notify(
+                        callback=callback,
+                        feedback=feedback,
+                        message="DUSAF fetch stopped after reaching max_features={}.".format(
+                            max_features
+                        ),
+                    )
+                    break
+
+                features.extend(page_features[:remaining])
+
+                if len(page_features) >= remaining:
+                    page_count += 1
+                    _notify(
+                        callback=callback,
+                        feedback=feedback,
+                        message="DUSAF fetch stopped after reaching max_features={}.".format(
+                            max_features
+                        ),
+                    )
+                    break
+            else:
+                features.extend(page_features)
+
             page_count += 1
 
             new_offset = next_offset(
