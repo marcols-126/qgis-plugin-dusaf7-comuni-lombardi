@@ -284,6 +284,108 @@ def extract_archive(archive_path, destination_dir):
     return extracted_paths
 
 
+def validate_extracted_directory(extracted_dir):
+    """Validate and return an existing directory containing extracted ISTAT files."""
+    if not isinstance(extracted_dir, str) or not extracted_dir.strip():
+        raise ValueError("ISTAT extracted_dir must be a non-empty string.")
+
+    path = os.path.abspath(extracted_dir.strip())
+
+    if not os.path.isdir(path):
+        raise ValueError("ISTAT extracted_dir does not exist or is not a directory: {}.".format(path))
+
+    return path
+
+
+def find_extracted_shapefile(extracted_dir, layer_name=ISTAT_EXPECTED_LAYER_NAME):
+    """Find the main ISTAT municipal shapefile in an extracted directory.
+
+    The expected file ``Com01012026_WGS84.shp`` is preferred. If it is not
+    found, the function looks recursively for a single ``.shp`` file whose
+    basename matches the expected layer name case-insensitively.
+    """
+    extracted_dir = validate_extracted_directory(extracted_dir)
+    layer_name = validate_expected_layer_name(layer_name)
+    expected_filename = "{}.shp".format(layer_name)
+    direct_path = os.path.join(extracted_dir, expected_filename)
+
+    if os.path.isfile(direct_path):
+        return os.path.abspath(direct_path)
+
+    matches = []
+    expected_lower = expected_filename.lower()
+
+    for root, dirnames, filenames in os.walk(extracted_dir):
+        dirnames[:] = [name for name in dirnames if name not in (".", "..")]
+        for filename in filenames:
+            if filename.lower() == expected_lower:
+                matches.append(os.path.abspath(os.path.join(root, filename)))
+
+    if len(matches) == 1:
+        return matches[0]
+
+    if len(matches) > 1:
+        raise ValueError(
+            "Multiple ISTAT shapefiles named '{}' found in extracted directory: {}.".format(
+                expected_filename,
+                extracted_dir,
+            )
+        )
+
+    raise FileNotFoundError(
+        "Expected ISTAT shapefile '{}' was not found in extracted directory: {}.".format(
+            expected_filename,
+            extracted_dir,
+        )
+    )
+
+
+def validate_extracted_shapefile_components(shp_path):
+    """Validate required component files for an extracted ISTAT shapefile.
+
+    The function checks only filesystem presence of ``.shp``, ``.dbf``, ``.shx``
+    and ``.prj`` files sharing the same basename. It does not load the layer in
+    QGIS and does not inspect attributes.
+    """
+    if not isinstance(shp_path, str) or not shp_path.strip():
+        raise ValueError("ISTAT shapefile path must be a non-empty string.")
+
+    path = os.path.abspath(shp_path.strip())
+
+    if not os.path.isfile(path):
+        raise FileNotFoundError("ISTAT shapefile does not exist: {}.".format(path))
+
+    if not path.lower().endswith(".shp"):
+        raise ValueError("ISTAT shapefile path must point to a .shp file: {}.".format(path))
+
+    stem = os.path.splitext(path)[0]
+    present = {}
+    missing = []
+
+    for extension in ISTAT_REQUIRED_SHAPEFILE_EXTENSIONS:
+        component_path = stem + extension
+        if os.path.isfile(component_path):
+            present[extension] = component_path
+        else:
+            missing.append(extension)
+
+    if missing:
+        raise ValueError(
+            "ISTAT shapefile is missing required component files: {}.".format(
+                ", ".join(missing),
+            )
+        )
+
+    return present
+
+
+def resolve_valid_extracted_shapefile(extracted_dir, layer_name=ISTAT_EXPECTED_LAYER_NAME):
+    """Return the full path to a valid extracted ISTAT ``.shp`` file."""
+    shp_path = find_extracted_shapefile(extracted_dir, layer_name=layer_name)
+    validate_extracted_shapefile_components(shp_path)
+    return shp_path
+
+
 def validate_download_url(download_url):
     """Validate and return a configured ISTAT archive HTTPS URL."""
     if not isinstance(download_url, str) or not download_url.strip():
@@ -467,3 +569,15 @@ class IstatBoundariesClient:
     def extract_archive(self, archive_path, destination_dir):
         """Extract a previously downloaded ISTAT ZIP after safety checks."""
         return extract_archive(archive_path, destination_dir)
+
+    def find_extracted_shapefile(self, extracted_dir):
+        """Find the expected extracted ISTAT municipal .shp file."""
+        return find_extracted_shapefile(extracted_dir, self.expected_layer_name)
+
+    def validate_extracted_shapefile_components(self, shp_path):
+        """Validate required sidecar files for an extracted ISTAT shapefile."""
+        return validate_extracted_shapefile_components(shp_path)
+
+    def resolve_valid_extracted_shapefile(self, extracted_dir):
+        """Return a valid extracted ISTAT .shp path without loading it in QGIS."""
+        return resolve_valid_extracted_shapefile(extracted_dir, self.expected_layer_name)
