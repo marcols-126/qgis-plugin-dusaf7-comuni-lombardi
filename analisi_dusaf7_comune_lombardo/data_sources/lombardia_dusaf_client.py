@@ -21,7 +21,51 @@ DUSAF_EXPECTED_CRS_AUTHID = "EPSG:32632"
 DUSAF_CLASS_FIELD = "COD_TOT"
 DUSAF_DESCRIPTION_FIELD = "DESCR"
 DUSAF_DEFAULT_PAGE_SIZE = 1000
+DUSAF_MIN_PAGE_SIZE = 1
+DUSAF_MAX_PAGE_SIZE = 1000
 DUSAF_QUERY_FORMAT = "geojson"
+
+
+def validate_page_size(page_size):
+    """Validate and return an ArcGIS REST page size.
+
+    Regione Lombardia's service advertises a conservative record limit of 1000.
+    This helper keeps future callers inside that range and performs no network
+    request.
+    """
+    if isinstance(page_size, bool):
+        raise ValueError("DUSAF page_size must be an integer, not a boolean value.")
+
+    try:
+        value = int(page_size)
+    except (TypeError, ValueError):
+        raise ValueError("DUSAF page_size must be an integer.") from None
+
+    if value < DUSAF_MIN_PAGE_SIZE or value > DUSAF_MAX_PAGE_SIZE:
+        raise ValueError(
+            "DUSAF page_size must be between {} and {} records.".format(
+                DUSAF_MIN_PAGE_SIZE,
+                DUSAF_MAX_PAGE_SIZE,
+            )
+        )
+
+    return value
+
+
+def validate_offset(offset):
+    """Validate and return a zero-based ArcGIS REST pagination offset."""
+    if isinstance(offset, bool):
+        raise ValueError("DUSAF offset must be an integer, not a boolean value.")
+
+    try:
+        value = int(offset)
+    except (TypeError, ValueError):
+        raise ValueError("DUSAF offset must be an integer.") from None
+
+    if value < 0:
+        raise ValueError("DUSAF offset must be greater than or equal to zero.")
+
+    return value
 
 
 @dataclass(frozen=True)
@@ -53,7 +97,10 @@ class LombardiaDusafClient:
     default_page_size = DUSAF_DEFAULT_PAGE_SIZE
 
     def __init__(self, page_size=None):
-        self.page_size = int(page_size or self.default_page_size)
+        if page_size is None:
+            page_size = self.default_page_size
+
+        self.page_size = validate_page_size(page_size)
 
     def metadata(self):
         """Return static metadata expected by the current algorithm."""
@@ -85,7 +132,7 @@ class LombardiaDusafClient:
             "outFields": ",".join(out_fields) if out_fields else "*",
             "returnGeometry": "true",
             "resultRecordCount": self.page_size,
-            "resultOffset": int(offset),
+            "resultOffset": validate_offset(offset),
             "outSR": "32632",
         }
 

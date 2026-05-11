@@ -19,6 +19,99 @@ CACHE_SUBFOLDER_NAME = "cache"
 CACHE_MANIFEST_FILENAME = "manifest.json"
 DUSAF_CACHE_FOLDER = "dusaf7"
 ISTAT_CACHE_FOLDER = "istat_boundaries"
+VALID_DATASET_KEYS = (DUSAF_CACHE_FOLDER, ISTAT_CACHE_FOLDER)
+
+
+def validate_dataset_key(dataset_key):
+    """Validate and return a known cache dataset key.
+
+    Args:
+        dataset_key: Dataset namespace used below the plugin cache root.
+
+    Raises:
+        ValueError: If the key is empty or not one of the supported cache
+            namespaces.
+    """
+    if not isinstance(dataset_key, str) or not dataset_key.strip():
+        raise ValueError("Cache dataset_key must be a non-empty string.")
+
+    dataset_key = dataset_key.strip()
+
+    if dataset_key not in VALID_DATASET_KEYS:
+        raise ValueError(
+            "Unknown cache dataset_key '{}'. Expected one of: {}.".format(
+                dataset_key,
+                ", ".join(VALID_DATASET_KEYS),
+            )
+        )
+
+    return dataset_key
+
+
+def validate_cache_filename(filename):
+    """Validate and return a safe cache filename.
+
+    The cache layer accepts plain filenames only. Absolute paths, nested paths,
+    empty names, and traversal segments such as ``..`` are rejected.
+    """
+    if not isinstance(filename, str) or not filename.strip():
+        raise ValueError("Cache filename must be a non-empty string.")
+
+    filename = filename.strip()
+
+    if os.path.isabs(filename):
+        raise ValueError(f"Unsafe cache filename '{filename}': absolute paths are not allowed.")
+
+    if filename in (".", ".."):
+        raise ValueError(f"Unsafe cache filename '{filename}': reserved path segment.")
+
+    if "/" in filename or "\\" in filename:
+        raise ValueError(
+            f"Unsafe cache filename '{filename}': directory separators are not allowed."
+        )
+
+    if os.path.basename(filename) != filename:
+        raise ValueError(f"Unsafe cache filename '{filename}': nested paths are not allowed.")
+
+    return filename
+
+
+def validate_manifest_data(manifest):
+    """Validate cache manifest data already loaded in memory.
+
+    The function performs no file access. It returns a list of technical,
+    human-readable validation errors; an empty list means the structure is
+    acceptable for future cache use.
+    """
+    errors = []
+
+    if manifest is None:
+        return errors
+
+    if not isinstance(manifest, dict):
+        return ["Cache manifest must be a dictionary object."]
+
+    datasets = manifest.get("datasets")
+    if datasets is not None:
+        if not isinstance(datasets, dict):
+            errors.append("Cache manifest field 'datasets' must be a dictionary.")
+        else:
+            for dataset_key, dataset_info in datasets.items():
+                try:
+                    validate_dataset_key(dataset_key)
+                except ValueError as exc:
+                    errors.append(str(exc))
+
+                if not isinstance(dataset_info, dict):
+                    errors.append(
+                        "Cache manifest dataset '{}' must be a dictionary.".format(dataset_key)
+                    )
+
+    version = manifest.get("version")
+    if version is not None and not isinstance(version, (int, str)):
+        errors.append("Cache manifest field 'version' must be a string or integer.")
+
+    return errors
 
 
 @dataclass(frozen=True)
@@ -91,13 +184,13 @@ class CacheManager:
             dataset_key: Either ``dusaf7`` or ``istat_boundaries``.
             filename: Relative filename expected inside that dataset folder.
         """
+        dataset_key = validate_dataset_key(dataset_key)
+        filename = validate_cache_filename(filename)
+
         paths = self.paths()
         folders = {
             DUSAF_CACHE_FOLDER: paths.dusaf_dir,
             ISTAT_CACHE_FOLDER: paths.istat_dir,
         }
-
-        if dataset_key not in folders:
-            raise ValueError(f"Unknown cache dataset key: {dataset_key}")
 
         return os.path.join(folders[dataset_key], filename)

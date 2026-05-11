@@ -29,6 +29,77 @@ ISTAT_MUNICIPALITY_FIELD_CANDIDATES = (
 )
 
 
+def validate_reference_year(reference_year):
+    """Validate and return an ISTAT administrative boundary reference year."""
+    if isinstance(reference_year, bool):
+        raise ValueError("ISTAT reference_year must be an integer, not a boolean value.")
+
+    try:
+        value = int(reference_year)
+    except (TypeError, ValueError):
+        raise ValueError("ISTAT reference_year must be an integer.") from None
+
+    if value < 2002:
+        raise ValueError("ISTAT reference_year must be 2002 or later for this dataset family.")
+
+    return value
+
+
+def validate_expected_layer_name(layer_name):
+    """Validate and return the expected ISTAT layer name.
+
+    Only a simple layer/file stem is accepted. Paths are intentionally rejected
+    so future cache code cannot accidentally use a layer name as a filesystem
+    path.
+    """
+    if not isinstance(layer_name, str) or not layer_name.strip():
+        raise ValueError("ISTAT expected layer name must be a non-empty string.")
+
+    value = layer_name.strip()
+
+    if "/" in value or "\\" in value:
+        raise ValueError("ISTAT expected layer name must not contain path separators.")
+
+    if value in (".", ".."):
+        raise ValueError("ISTAT expected layer name must not be a reserved path segment.")
+
+    return value
+
+
+def validate_dataset_spec(spec):
+    """Validate an ISTAT dataset spec already present in memory.
+
+    The function performs no network or file access. It returns a list of
+    technical validation errors; an empty list means the structure is suitable
+    for future use.
+    """
+    errors = []
+
+    if not isinstance(spec, IstatDatasetSpec):
+        return ["ISTAT dataset spec must be an IstatDatasetSpec instance."]
+
+    try:
+        validate_reference_year(spec.reference_year)
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    try:
+        validate_expected_layer_name(spec.expected_layer_name)
+    except ValueError as exc:
+        errors.append(str(exc))
+
+    if not isinstance(spec.landing_page_url, str) or not spec.landing_page_url.startswith("https://"):
+        errors.append("ISTAT landing_page_url must be an HTTPS URL string.")
+
+    if not isinstance(spec.expected_crs_authid, str) or not spec.expected_crs_authid.startswith("EPSG:"):
+        errors.append("ISTAT expected_crs_authid must be an EPSG authid string.")
+
+    if not spec.municipality_field_candidates:
+        errors.append("ISTAT municipality_field_candidates must not be empty.")
+
+    return errors
+
+
 @dataclass(frozen=True)
 class IstatDatasetSpec:
     """Description of an ISTAT boundary dataset expected by the plugin."""
