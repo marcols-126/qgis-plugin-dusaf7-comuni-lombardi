@@ -8,7 +8,10 @@ the current Processing workflow.
 """
 
 from dataclasses import dataclass
+import json
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
+from urllib.request import urlopen
 
 
 DUSAF_SERVICE_URL = (
@@ -218,12 +221,49 @@ class ArcGisQuerySpec:
         return f"{self.url}?{urlencode(self.params)}"
 
 
-class LombardiaDusafClient:
-    """Prepare future DUSAF 7 ArcGIS REST requests.
+def _notify(callback=None, feedback=None, message=""):
+    """Send an optional progress message without importing QGIS classes."""
+    if callable(callback):
+        callback(message)
 
-    This class deliberately avoids any direct download implementation for now.
-    A later integration can use QGIS/Qt network APIs from a QgsTask so QGIS UI
-    remains responsive.
+    if feedback is not None and hasattr(feedback, "pushInfo"):
+        feedback.pushInfo(message)
+
+
+def _raise_if_canceled(feedback=None):
+    """Raise a generic runtime error when an optional feedback object is canceled."""
+    if feedback is not None and hasattr(feedback, "isCanceled") and feedback.isCanceled():
+        raise RuntimeError("DUSAF feature download canceled.")
+
+
+def _read_json_url(url, timeout):
+    """Read a JSON document from URL using standard library only."""
+    try:
+        with urlopen(url, timeout=timeout) as response:
+            status = getattr(response, "status", 200)
+            if status < 200 or status >= 300:
+                raise ValueError(f"DUSAF ArcGIS request failed with HTTP status {status}.")
+
+            payload = response.read().decode("utf-8")
+
+    except HTTPError as exc:
+        raise ValueError(f"DUSAF ArcGIS request failed with HTTP status {exc.code}.") from exc
+    except URLError as exc:
+        raise ValueError(f"DUSAF ArcGIS network error: {exc.reason}.") from exc
+    except TimeoutError as exc:
+        raise ValueError("DUSAF ArcGIS request timed out.") from exc
+
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError("DUSAF ArcGIS response is not valid JSON.") from exc
+
+
+class LombardiaDusafClient:
+    """Prepare and optionally execute isolated DUSAF 7 ArcGIS REST requests.
+
+    Network access happens only when ``fetch_features`` is called explicitly.
+    The class is not integrated into the current Processing workflow.
     """
 
     service_url = DUSAF_SERVICE_URL
@@ -278,7 +318,7 @@ class LombardiaDusafClient:
             geometry = validate_envelope_32632(geometry)
             params.update(
                 {
-                    "geometry": geometry,
+                    "geometry": json.dumps(geometry, separators=(",", ":")),
                     "geometryType": "esriGeometryEnvelope",
                     "spatialRel": "esriSpatialRelIntersects",
                     "inSR": "32632",
@@ -287,9 +327,89 @@ class LombardiaDusafClient:
 
         return ArcGisQuerySpec(url=f"{self.layer_url}/query", params=params)
 
-    def fetch_features(self, *args, **kwargs):
-        """Placeholder for future asynchronous feature retrieval."""
-        raise NotImplementedError(
-            "DUSAF 7 download is not implemented yet. This stub is intentionally "
-            "not connected to the Processing workflow."
-        )
+    def fetch_features(
+        self,
+        geometry=None,
+        out_fields=None,
+        start_offset=0,
+        max_pages=None,
+        timeout=60,
+        callback=None,
+        feedback=None,
+    ):
+        """Fetch DUSAF features from ArcGIS REST when explicitly called.
+
+        The method is intentionally isolated from the Processing workflow. It
+        keeps all features in memory, writes no files, creates no directories,
+        and uses only Python standard library networking.
+        """
+        current_offset = validate_offset(start_offset)
+        timeout = _coerce_number(timeout, "timeout")
+
+        if timeout <= 0:
+            raise ValueError("DUSAF timeout must be greater than zero.")
+
+        if max_pages is not None:
+            if isinstance(max_pages, bool):
+                raise ValueError("DUSAF max_pages must be an integer, not a boolean value.")
+            try:
+                max_pages = int(max_pages)
+            except (TypeError, ValueError):
+                raise ValueError("DUSAF max_pages must be an integer.") from None
+            if max_pages <= 0:
+                raise ValueError("DUSAF max_pages must be greater than zero.")
+
+        features = []
+        page_count = 0
+
+        while True:
+            _raise_if_canceled(feedback)
+
+            if max_pages is not None and page_count >= max_pages:
+                _notify(
+                    callback=callback,
+                    feedback=feedback,
+                    message="DUSAF fetch stopped at max_pages={}. ".format(max_pages)
+                    + "More features may be available.",
+                )
+                break
+
+            query_spec = self.build_query_spec(
+                geometry=geometry,
+                out_fields=out_fields,
+                offset=current_offset,
+            )
+            _notify(
+                callback=callback,
+                feedback=feedback,
+                message="DUSAF fetch page {} at offset {}.".format(page_count + 1, current_offset),
+            )
+
+            response_json = validate_arcgis_json_response(
+                _read_json_url(query_spec.as_url(), timeout=timeout)
+            )
+
+            if "features" not in response_json:
+                raise ValueError("DUSAF ArcGIS response does not contain a 'features' field.")
+
+            page_features = response_json["features"]
+            features.extend(page_features)
+            page_count += 1
+
+            new_offset = next_offset(
+                response_json,
+                current_offset=current_offset,
+                page_size=self.page_size,
+            )
+
+            if new_offset is None:
+                break
+
+            if new_offset <= current_offset:
+                raise ValueError(
+                    "DUSAF pagination did not advance from offset {}.".format(current_offset)
+                )
+
+            current_offset = new_offset
+
+        return features
