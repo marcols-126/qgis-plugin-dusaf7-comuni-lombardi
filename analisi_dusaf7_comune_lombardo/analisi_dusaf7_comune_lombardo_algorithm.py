@@ -41,6 +41,7 @@ from .workflow.output import (
     STYLE_FOLDER_NAME,
     STYLE_SLIVERS,
 )
+from .workflow.pipeline import target_crs
 from .workflow.qc import AUDIT_TOLERANCE_M2
 
 
