@@ -229,6 +229,52 @@ def validate_arcgis_json_response(response_json):
     return response_json
 
 
+def validate_dusaf_feature(feature):
+    """Validate one DUSAF ArcGIS/GeoJSON feature already loaded in memory."""
+    if not isinstance(feature, dict):
+        raise ValueError("DUSAF feature must be a dictionary.")
+
+    if "geometry" not in feature or feature["geometry"] is None:
+        raise ValueError("DUSAF feature is missing geometry.")
+
+    if "attributes" in feature:
+        attributes = feature["attributes"]
+        attribute_container = "attributes"
+    elif "properties" in feature:
+        attributes = feature["properties"]
+        attribute_container = "properties"
+    else:
+        raise ValueError("DUSAF feature is missing attributes/properties.")
+
+    if not isinstance(attributes, dict):
+        raise ValueError(f"DUSAF feature {attribute_container} must be a dictionary.")
+
+    missing = [
+        field for field in (DUSAF_CLASS_FIELD, DUSAF_DESCRIPTION_FIELD)
+        if field not in attributes
+    ]
+    if missing:
+        raise ValueError(
+            "DUSAF feature is missing required fields: {}.".format(", ".join(missing))
+        )
+
+    return feature
+
+
+def validate_dusaf_features(features):
+    """Validate a list of DUSAF features without modifying it."""
+    if not isinstance(features, list):
+        raise ValueError("DUSAF features must be a list.")
+
+    for index, feature in enumerate(features):
+        try:
+            validate_dusaf_feature(feature)
+        except ValueError as exc:
+            raise ValueError("Invalid DUSAF feature at index {}: {}.".format(index, exc)) from exc
+
+    return features
+
+
 def response_has_features(response_json):
     """Return True when a validated ArcGIS response contains at least one feature."""
     response_json = validate_arcgis_json_response(response_json)
