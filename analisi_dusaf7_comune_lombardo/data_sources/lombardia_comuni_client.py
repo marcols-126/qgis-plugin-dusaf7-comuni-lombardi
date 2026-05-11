@@ -217,12 +217,16 @@ _APOSTROPHE_LOWERCASE_HEADS = frozenset(
 )
 
 
+_APOSTROPHE_VARIANTS = ("`", "‘", "’", "ʼ", "´")
+
+
 def normalize_comune_display_name(value):
     """Return a human-friendly form of a RL service municipality name.
 
-    The Lombardia ArcGIS REST service serves ``NOME_COM`` in uppercase. For
-    the user interface (autocomplete, alerts, logs) we want the conventional
-    title-case form. Handled cases:
+    The Lombardia ArcGIS REST service serves ``NOME_COM`` in uppercase and
+    sometimes uses a backtick (`` ` ``) or other apostrophe variants instead
+    of the ASCII apostrophe. For the user interface (autocomplete, alerts,
+    logs) we want the conventional title-case form. Handled cases:
 
     - ``ZIBIDO SAN GIACOMO`` -> ``Zibido San Giacomo``
     - ``SAN GIORGIO SU LEGNANO`` -> ``San Giorgio su Legnano`` (linking
@@ -231,6 +235,8 @@ def normalize_comune_display_name(value):
       lowercase mid-name, but the following toponym is capitalised)
     - ``L'AQUILA`` -> ``L'Aquila`` (apostrophe head stays capitalised when
       it is the first word of the name)
+    - ``ALBANO SANT`ALESSANDRO`` -> ``Albano Sant'Alessandro`` (backtick is
+      normalised to a regular apostrophe before processing)
     """
     if not isinstance(value, str):
         return value
@@ -238,6 +244,9 @@ def normalize_comune_display_name(value):
     text = value.strip()
     if not text:
         return text
+
+    for variant in _APOSTROPHE_VARIANTS:
+        text = text.replace(variant, "'")
 
     parts = []
     for index, word in enumerate(text.split()):
