@@ -223,10 +223,12 @@ class CacheManager:
         return manifest
 
     def write_manifest(self, manifest):
-        """Validate and write cache metadata as ordered UTF-8 JSON.
+        """Validate and atomically write cache metadata as ordered UTF-8 JSON.
 
         The base cache directory is created only because this method is called
         explicitly. Dataset subdirectories are not created by manifest writes.
+        Data is first written to ``manifest.json.tmp`` in the same directory,
+        then moved into place with ``os.replace``.
 
         Raises:
             ValueError: If the manifest structure is invalid.
@@ -239,10 +241,21 @@ class CacheManager:
 
         self.ensure_base_dir()
         manifest_path = self.paths().manifest_path
+        temp_path = manifest_path + ".tmp"
 
-        with open(manifest_path, "w", encoding="utf-8") as handle:
-            json.dump(manifest_data, handle, ensure_ascii=True, indent=2, sort_keys=True)
-            handle.write("\n")
+        try:
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(manifest_data, handle, ensure_ascii=True, indent=2, sort_keys=True)
+                handle.write("\n")
+
+            os.replace(temp_path, manifest_path)
+        except Exception:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+            raise
 
         return manifest_path
 
