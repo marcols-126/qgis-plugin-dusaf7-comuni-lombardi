@@ -8,8 +8,6 @@ from qgis.PyQt.QtCore import Qt, QStringListModel
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCompleter,
-    QDialog,
-    QDialogButtonBox,
     QLabel,
     QLineEdit,
     QVBoxLayout,
@@ -64,21 +62,6 @@ DUSAF_DESC_FIELD = "DESCR"
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 
-URL_CONFINI_ISTAT_2026 = (
-    "https://www.istat.it/notizia/confini-delle-unita-amministrative-a-fini-statistici-al-1-gennaio-2018-2/"
-)
-
-URL_DUSAF7_RL = (
-    "https://www.geoportale.regione.lombardia.it/download-pacchetti?"
-    "p_p_id=dwnpackageportlet_WAR_gptdownloadportlet&"
-    "p_p_lifecycle=0&"
-    "p_p_state=normal&"
-    "p_p_mode=view&"
-    "_dwnpackageportlet_WAR_gptdownloadportlet_metadataid=r_lombar%3A7cd05e9f-b693-4d7e-a8de-71b40b45f54e&"
-    "_jsfBridgeRedirect=true"
-)
-
-
 MUNICIPALITY_FIELD_CANDIDATES = [
     "COMUNE",
     "comune",
@@ -113,8 +96,6 @@ REGION_NAME_FIELD_CANDIDATES = [
     "NOME_REG",
     "nome_reg",
 ]
-
-_PREREQUISITE_DIALOG_SHOWN = False
 
 
 # =============================================================================
@@ -240,93 +221,6 @@ def _find_comuni_project_layer():
                 return layer
 
     return None
-
-
-def _show_prerequisite_dialog():
-    global _PREREQUISITE_DIALOG_SHOWN
-
-    if _PREREQUISITE_DIALOG_SHOWN:
-        return
-
-    _PREREQUISITE_DIALOG_SHOWN = True
-
-    parent = QApplication.activeWindow()
-
-    dialog = QDialog(parent)
-    dialog.setWindowTitle("Prerequisiti obbligatori - Analisi DUSAF 7")
-    dialog.setMinimumWidth(720)
-
-    layout = QVBoxLayout(dialog)
-
-    label = QLabel()
-    label.setTextFormat(Qt.RichText)
-    label.setOpenExternalLinks(True)
-    label.setWordWrap(True)
-    label.setText(
-        f"""
-        <h2 style="color:#cc0000;">ATTENZIONE - DATI OBBLIGATORI</h2>
-
-        <p>
-        Prima di proseguire con l'interfaccia dello strumento, verifica di avere scaricato
-        i dati di base, di averli salvati o estratti nella cartella del progetto QGIS
-        e di avere caricato nel progetto solo i layer necessari.
-        </p>
-
-        <h3>1. Confini amministrativi ISTAT 2026</h3>
-        <p>
-        Scarica i confini amministrativi dal link:
-        <br>
-        <a href="{URL_CONFINI_ISTAT_2026}">
-        {URL_CONFINI_ISTAT_2026}
-        </a>
-        </p>
-        <p>
-        Dopo il download, estrai tutto il contenuto nella cartella del progetto QGIS
-        e carica nel progetto il layer:
-        <br>
-        <b>{COMUNI_REQUIRED_LAYER_NAME}</b>
-        </p>
-
-        <h3>2. DUSAF 7 - Regione Lombardia</h3>
-        <p>
-        Scarica DUSAF 7 dal Geoportale di Regione Lombardia:
-        <br>
-        <a href="{URL_DUSAF7_RL}">
-        Scarica DUSAF 7 - Regione Lombardia
-        </a>
-        </p>
-        <p>
-        Dopo il download, estrai tutto il contenuto nella cartella del progetto QGIS
-        e carica nel progetto il layer:
-        <br>
-        <b>{DUSAF_REQUIRED_LAYER_NAME}</b>
-        </p>
-
-        <h3>Prima di premere OK</h3>
-        <ul>
-            <li>Il progetto QGIS deve essere salvato.</li>
-            <li>Il layer <b>{DUSAF_REQUIRED_LAYER_NAME}</b> deve essere già caricato nel progetto.</li>
-            <li>Il layer <b>{COMUNI_REQUIRED_LAYER_NAME}</b> deve essere già caricato nel progetto.</li>
-            <li>Gli stili QML vengono cercati nella cartella <b>stili</b> del progetto e, se assente, nella cartella <b>stili</b> del plugin.</li>
-        </ul>
-
-        <p>
-        Premi <b>OK</b> solo dopo avere completato questi passaggi.
-        </p>
-        """
-    )
-
-    layout.addWidget(label)
-
-    button_box = QDialogButtonBox(QDialogButtonBox.Ok)
-    button_box.button(QDialogButtonBox.Ok).setText("OK, prosegui")
-    button_box.accepted.connect(dialog.accept)
-    layout.addWidget(button_box)
-
-    if hasattr(dialog, "exec_"):
-        dialog.exec_()
-    else:
-        dialog.exec()
 
 
 # =============================================================================
@@ -625,94 +519,103 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         return f"""
         <h3>Analisi DUSAF 7 - Comune Lombardo</h3>
 
-        <div style="border:2px solid #cc0000; padding:12px; background-color:#fff3f3;">
-            <h2 style="color:#cc0000;">ATTENZIONE - DATI DA SCARICARE E CARICARE PRIMA DELL'ESECUZIONE</h2>
+        <p>
+        Calcolo automatico delle superfici per classe d'uso del suolo
+        (DUSAF 7) ritagliate sul perimetro di un Comune lombardo, con
+        Data Audit QC-4 ed export GeoPackage e CSV.
+        </p>
 
+        <div style="border:1px solid #3c8d3c; padding:10px; background-color:#eefbea;">
+            <h4 style="color:#006100; margin-top:0;">Dati: nessun layer richiesto in progetto</h4>
             <p>
-            Prima di utilizzare questo strumento è necessario scaricare i dati di base,
-            estrarre tutto il contenuto nella cartella del progetto QGIS e caricare nel progetto
-            solo i layer necessari.
+            Il plugin recupera automaticamente i dati necessari dai servizi
+            ufficiali Regione Lombardia ArcGIS REST:
             </p>
-
-            <h3>1. Confini amministrativi ISTAT 2026</h3>
-            <p>
-            <a href="{URL_CONFINI_ISTAT_2026}">
-            Scarica Confini amministrativi ISTAT 2026
-            </a>
-            </p>
-            <p>
-            Layer da caricare in QGIS:
-            <br>
-            <b>{COMUNI_REQUIRED_LAYER_NAME}</b>
-            </p>
-
-            <h3>2. DUSAF 7 - Regione Lombardia</h3>
-            <p>
-            <a href="{URL_DUSAF7_RL}">
-            Scarica DUSAF 7 - Regione Lombardia
-            </a>
-            </p>
-            <p>
-            Layer da caricare in QGIS:
-            <br>
-            <b>{DUSAF_REQUIRED_LAYER_NAME}</b>
-            </p>
-
-            <h3>Prerequisiti operativi</h3>
             <ul>
-                <li>Il progetto QGIS deve essere salvato.</li>
-                <li>Il layer <b>{DUSAF_REQUIRED_LAYER_NAME}</b> deve essere già caricato nel progetto.</li>
-                <li>Il layer <b>{COMUNI_REQUIRED_LAYER_NAME}</b> deve essere già caricato nel progetto.</li>
-                <li>Gli stili QML vengono cercati nella cartella <b>stili</b> del progetto e, se assente, nella cartella <b>stili</b> del plugin.</li>
+                <li>
+                    <b>Confini comunali</b> dal layer
+                    <i>Ambiti_Amministrativi_Lombardia</i> (download del solo
+                    Comune selezionato, ~10 KB).
+                </li>
+                <li>
+                    <b>DUSAF 7</b> dal layer <i>dusaf7</i> limitato al bounding
+                    box del Comune (poche centinaia di feature, ~MB).
+                </li>
             </ul>
-
             <p>
-            Il nome Comune deve corrispondere a un valore valido del layer
-            <b>{COMUNI_REQUIRED_LAYER_NAME}</b>. Lo strumento non procede se il Comune digitato
-            non è presente nell'elenco dei Comuni lombardi.
+            La lista dei 1500+ Comuni lombardi viene scaricata una volta sola
+            e mantenuta in cache nel profilo QGIS (TTL 30 giorni). Il primo
+            avvio richiede pochi secondi; gli avvii successivi sono istantanei.
             </p>
         </div>
 
-        <h4>Interfaccia utente</h4>
-        <ul>
-            <li>Nome del Comune da analizzare, con completamento automatico.</li>
-            <li>Area minima degli slivers in m².</li>
-        </ul>
-
+        <h4>Compatibilità con layer già caricati (back-compat)</h4>
         <p>
-        I layer <b>{DUSAF_REQUIRED_LAYER_NAME}</b> e <b>{COMUNI_REQUIRED_LAYER_NAME}</b>
-        vengono riconosciuti automaticamente dal progetto QGIS attivo.
+        Se nel progetto QGIS sono già presenti layer denominati
+        <b>{DUSAF_REQUIRED_LAYER_NAME}</b> e <b>{COMUNI_REQUIRED_LAYER_NAME}</b>
+        (oppure varianti con stessi campi), il plugin li usa al posto del fetch
+        REST. Comportamento identico alle versioni precedenti.
         </p>
 
-        <h4>Stili QML attesi</h4>
+        <h4>Parametri</h4>
         <ul>
-            <li><b>{STYLE_DUSAF_FINAL}</b></li>
-            <li><b>{STYLE_DUSAF_CLIP_QC}</b></li>
+            <li><b>Nome del Comune</b>: completamento automatico case-insensitive.</li>
+            <li><b>Area minima slivers</b>: soglia m² per segnalare frammenti residui di clip.</li>
+        </ul>
+
+        <h4>Prerequisiti</h4>
+        <ul>
+            <li>Il progetto QGIS deve essere <b>salvato</b> (gli output vanno nella cartella progetto).</li>
+            <li>Connessione internet attiva al primo avvio (cache REST).</li>
+        </ul>
+
+        <h4>Output</h4>
+        <p>
+        I file sono salvati nella sottocartella
+        <i>output_dusaf7_&lt;nome_comune&gt;/</i> del progetto:
+        </p>
+        <ul>
+            <li>GeoPackage con i layer: <i>superfici per classe</i>, <i>clip QC</i>, <i>confine</i>, <i>slivers</i>.</li>
+            <li>CSV riepilogativo (separator ; encoding UTF-8 BOM).</li>
+        </ul>
+        <p>
+        I quattro layer vengono anche caricati nel progetto con stili QML
+        applicati automaticamente (cartella <b>stili</b> del progetto, poi
+        del plugin):
+        </p>
+        <ul>
+            <li><b>{STYLE_DUSAF_FINAL}</b> (superfici - bordo rosso, fill trasparente)</li>
+            <li><b>{STYLE_DUSAF_CLIP_QC}</b> (categorizzato su {DUSAF_CLASS_FIELD})</li>
             <li><b>{STYLE_CONFINE}</b></li>
             <li><b>{STYLE_SLIVERS}</b></li>
         </ul>
 
-        <h4>Workflow</h4>
-        <ul>
-            <li>Verifica preliminare dei layer caricati.</li>
-            <li>Validazione del Comune selezionato.</li>
-            <li>Fix geometries sugli input.</li>
-            <li>Riproiezione in EPSG:32632.</li>
-            <li>Estrazione del Comune indicato.</li>
-            <li>Clip DUSAF sul perimetro comunale.</li>
-            <li>Fix geometries post-clip.</li>
-            <li>Gestione slivers con flag dedicato.</li>
+        <h4>Workflow (9 fasi)</h4>
+        <ol>
+            <li>Fix geometries Comuni.</li>
+            <li>Riproiezione Comuni in EPSG:32632.</li>
+            <li>Estrazione del Comune indicato (dissolve + fix).</li>
+            <li>Preparazione DUSAF (fetch REST se serve, fix, reproject).</li>
+            <li>Clip DUSAF sul perimetro comunale + slivers QC.</li>
             <li>Dissolve per classe DUSAF.</li>
-            <li>Calcolo superfici in m², ettari e percentuali.</li>
-            <li>Data Audit tra superficie DUSAF calcolata e superficie del perimetro comunale.</li>
-            <li>Esportazione GeoPackage e CSV nella cartella del progetto QGIS attivo.</li>
-        </ul>
+            <li>Data Audit QC-4 (tolleranza 1.0 m²).</li>
+            <li>Salvataggio GeoPackage + CSV.</li>
+            <li>Caricamento layer di output con stili.</li>
+        </ol>
 
         <h4>Configurazione fissa DUSAF - protocollo QC-4</h4>
         <ul>
             <li>Campo codice DUSAF: <b>{DUSAF_CLASS_FIELD}</b></li>
             <li>Campo descrizione DUSAF: <b>{DUSAF_DESC_FIELD}</b></li>
         </ul>
+
+        <p style="color:#666; font-size:90%;">
+        Nota tecnica: il servizio REST DUSAF di Regione Lombardia espone
+        DESCR ma non COD_TOT come campo separato. Il plugin parsa il codice
+        dal prefisso di DESCR (es: "1111 - tessuto residenziale denso").
+        Per la massima precisione LIV5 conviene comunque caricare nel
+        progetto il DUSAF7 desktop completo.
+        </p>
         """
 
     def initAlgorithm(self, config=None):
