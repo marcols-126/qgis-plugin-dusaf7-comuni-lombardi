@@ -26,7 +26,6 @@ from qgis.PyQt.QtWidgets import (
     QDialog,
     QDoubleSpinBox,
     QFormLayout,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,

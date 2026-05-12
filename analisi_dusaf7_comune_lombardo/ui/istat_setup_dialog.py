@@ -253,9 +253,11 @@ class IstatSetupDialog(QDialog):
 
         try:
             components = self._client.validate_required_shapefile_components(zip_path)
+            present = components.get("present", []) if isinstance(components, dict) else []
+            present_names = sorted(os.path.basename(p) for p in present)
             self._log_widget.appendPlainText(
-                f"[OK] Componenti shapefile trovati ({len(components)} file): "
-                + ", ".join(sorted(os.path.basename(p) for p in components))
+                f"[OK] Componenti shapefile trovati ({len(present_names)} file): "
+                + ", ".join(present_names)
             )
 
             self._log_widget.appendPlainText(
