@@ -259,8 +259,23 @@ class DusafMainDialog(QDialog):
         self._build_ui()
         self._load_settings()
         self._refresh_data_status()
+        self._refresh_output_mode_availability()
         self._populate_comune_autocomplete()
         self._update_run_state()
+
+    def showEvent(self, event):
+        """Refresh project-aware state every time the dialog is shown.
+
+        The dialog instance is reused across openings (it's a singleton on
+        the plugin side), so we re-check whether the project is now saved
+        before letting the user run.
+        """
+        super().showEvent(event)
+        try:
+            self._refresh_data_status()
+            self._refresh_output_mode_availability()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # UI construction
@@ -407,6 +422,11 @@ class DusafMainDialog(QDialog):
         self._mode_memory_radio.toggled.connect(self._on_output_mode_changed)
         self._mode_project_radio.toggled.connect(self._on_output_mode_changed)
         self._mode_custom_radio.toggled.connect(self._on_output_mode_changed)
+
+        self._output_mode_hint = QLabel("")
+        self._output_mode_hint.setWordWrap(True)
+        self._output_mode_hint.setStyleSheet("color:#7a4a00; font-size:90%;")
+        output_layout.addWidget(self._output_mode_hint)
 
         root.addWidget(output_box)
 
@@ -761,8 +781,56 @@ class DusafMainDialog(QDialog):
 
     def _on_output_mode_changed(self):
         is_custom = self._mode_custom_radio.isChecked()
-        self._custom_dir_edit.setEnabled(is_custom)
-        self._custom_dir_browse_btn.setEnabled(is_custom)
+        self._custom_dir_edit.setEnabled(
+            is_custom and self._mode_custom_radio.isEnabled()
+        )
+        self._custom_dir_browse_btn.setEnabled(
+            is_custom and self._mode_custom_radio.isEnabled()
+        )
+
+    def _project_is_saved(self):
+        project = QgsProject.instance()
+        if project.fileName():
+            return True
+        home = project.homePath()
+        return bool(home and str(home).strip() not in ("", "."))
+
+    def _refresh_output_mode_availability(self):
+        """Disable the 'project folder' radio when the project is not saved.
+
+        Also promote the selection to a valid alternative (memory) if the
+        currently-checked radio is unavailable. This prevents the user from
+        sitting on a mode that will fail at run time.
+        """
+        project_saved = self._project_is_saved()
+
+        self._mode_project_radio.setEnabled(project_saved)
+
+        if not project_saved:
+            self._mode_project_radio.setToolTip(
+                "Disponibile solo quando il progetto QGIS è stato salvato "
+                "(gli output vanno nella sua cartella)."
+            )
+            if self._mode_project_radio.isChecked():
+                # Promote to memory mode to avoid a guaranteed run-time error.
+                self._mode_memory_radio.setChecked(True)
+                self._output_mode_hint.setText(
+                    "<b>Nota:</b> progetto QGIS non salvato. La modalità "
+                    "'cartella del progetto' è disabilitata; impostata "
+                    "automaticamente la modalità 'solo memoria'. Per scrivere "
+                    "file su disco salva il progetto oppure scegli una "
+                    "cartella personalizzata."
+                )
+            else:
+                self._output_mode_hint.setText(
+                    "<b>Nota:</b> progetto QGIS non salvato. La modalità "
+                    "'cartella del progetto' è disabilitata."
+                )
+        else:
+            self._mode_project_radio.setToolTip("")
+            self._output_mode_hint.setText("")
+
+        self._on_output_mode_changed()
 
     def _on_browse_custom_dir(self):
         start = self._custom_dir_edit.text().strip() or self._last_output_dir or ""
@@ -800,7 +868,7 @@ class DusafMainDialog(QDialog):
         except (TypeError, ValueError):
             pass
 
-        self._on_output_mode_changed()
+        self._refresh_output_mode_availability()
 
     def _save_settings(self):
         self._settings.setValue(SETTINGS_OUTPUT_MODE, self._selected_output_mode())
