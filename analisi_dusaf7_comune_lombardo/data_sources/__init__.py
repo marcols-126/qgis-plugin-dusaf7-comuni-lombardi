@@ -16,6 +16,7 @@ directories, and does not touch the QGIS project state.
 """
 
 from .cache_manager import CacheManager
+from .comuni_list_cache import ComuniListCache
 from .istat_boundaries_client import IstatBoundariesClient
 from .layer_factory import geojson_features_to_memory_layer
 from .lombardia_comuni_client import (
@@ -26,6 +27,7 @@ from .lombardia_dusaf_client import LombardiaDusafClient
 
 __all__ = [
     "CacheManager",
+    "ComuniListCache",
     "IstatBoundariesClient",
     "LombardiaComuniClient",
     "LombardiaDusafClient",
