@@ -148,3 +148,52 @@ class TestOutFields:
     def test_rejects_unsafe(self, lombardia_dusaf_client):
         with pytest.raises(ValueError):
             lombardia_dusaf_client.validate_out_fields(["BAD NAME"])
+
+
+class TestEnvelopeTiling:
+    def test_split_2x2_produces_4_tiles(self, lombardia_dusaf_client):
+        env = {"xmin": 0.0, "ymin": 0.0, "xmax": 100.0, "ymax": 100.0}
+        tiles = lombardia_dusaf_client._split_envelope_into_grid(env, 2)
+        assert len(tiles) == 4
+
+    def test_split_3x3_produces_9_tiles(self, lombardia_dusaf_client):
+        env = {"xmin": 0.0, "ymin": 0.0, "xmax": 100.0, "ymax": 100.0}
+        tiles = lombardia_dusaf_client._split_envelope_into_grid(env, 3)
+        assert len(tiles) == 9
+
+    def test_split_covers_full_envelope(self, lombardia_dusaf_client):
+        env = {"xmin": 10.0, "ymin": 20.0, "xmax": 110.0, "ymax": 220.0}
+        tiles = lombardia_dusaf_client._split_envelope_into_grid(env, 4)
+        xmins = [t["xmin"] for t in tiles]
+        xmaxs = [t["xmax"] for t in tiles]
+        ymins = [t["ymin"] for t in tiles]
+        ymaxs = [t["ymax"] for t in tiles]
+        assert min(xmins) == 10.0
+        assert max(xmaxs) == 110.0
+        assert min(ymins) == 20.0
+        assert max(ymaxs) == 220.0
+
+    def test_split_1x1_returns_input(self, lombardia_dusaf_client):
+        env = {"xmin": 5.0, "ymin": 6.0, "xmax": 15.0, "ymax": 16.0}
+        tiles = lombardia_dusaf_client._split_envelope_into_grid(env, 1)
+        assert tiles == [{"xmin": 5.0, "ymin": 6.0, "xmax": 15.0, "ymax": 16.0}]
+
+
+class TestFeatureObjectId:
+    def test_from_geojson_id(self, lombardia_dusaf_client):
+        f = {"id": 42, "properties": {}, "geometry": {}}
+        assert lombardia_dusaf_client._feature_object_id(f) == 42
+
+    def test_from_properties_objectid(self, lombardia_dusaf_client):
+        f = {"properties": {"OBJECTID": 100, "DESCR": "x"}}
+        assert lombardia_dusaf_client._feature_object_id(f) == 100
+
+    def test_from_attributes_objectid(self, lombardia_dusaf_client):
+        f = {"attributes": {"OBJECTID": 7}}
+        assert lombardia_dusaf_client._feature_object_id(f) == 7
+
+    def test_none_when_missing(self, lombardia_dusaf_client):
+        assert lombardia_dusaf_client._feature_object_id({"properties": {"DESCR": "x"}}) is None
+
+    def test_none_for_non_dict(self, lombardia_dusaf_client):
+        assert lombardia_dusaf_client._feature_object_id("not a feature") is None

@@ -216,6 +216,24 @@ def fetch_comune_geometry_layer(comune_name, feedback=None):
     )
 
 
+_TILING_FALLBACK_HINTS = (
+    "failed to execute query",
+    "query failed",
+)
+
+
+def _looks_like_pagination_failure(message):
+    if not message:
+        return False
+    text = str(message).lower()
+    return any(hint in text for hint in _TILING_FALLBACK_HINTS)
+
+
+def _notify_log(feedback, message):
+    if feedback is not None and hasattr(feedback, "pushInfo"):
+        feedback.pushInfo(message)
+
+
 def fetch_dusaf_layer_for_envelope(envelope, feedback=None, max_pages=None, max_features=None):
     """Fetch DUSAF features inside the given EPSG:32632 envelope via REST.
 
@@ -227,14 +245,54 @@ def fetch_dusaf_layer_for_envelope(envelope, feedback=None, max_pages=None, max_
     and ``DESCR`` via REST: the ``COD_TOT`` column that the desktop workflow
     relies on is packed into the ``DESCR`` prefix. We unpack it here so the
     rest of the algorithm and the QML categorised renderer can keep working.
+
+    Resilience for large Comuni: when the standard paginated fetch trips on
+    the RL server's pagination limit ("Failed to execute query.."), the
+    request is retried with envelope tiling. Tiling 2x2 produces 4 tiles
+    whose features fit in a single page each; if 2x2 still fails it escalates
+    to 4x4. After 4x4 the resource is genuinely too large and the original
+    error is propagated.
     """
     client = LombardiaDusafClient()
-    features = client.fetch_features(
-        geometry=envelope,
-        feedback=feedback,
-        max_pages=max_pages,
-        max_features=max_features,
-    )
+    features = None
+
+    try:
+        features = client.fetch_features(
+            geometry=envelope,
+            feedback=feedback,
+            max_pages=max_pages,
+            max_features=max_features,
+        )
+    except ValueError as exc:
+        if not _looks_like_pagination_failure(str(exc)):
+            raise
+
+        _notify_log(
+            feedback,
+            "[FALLBACK] Paginazione DUSAF fallita; passo a tiling 2x2 dell'envelope...",
+        )
+
+        try:
+            features = client.fetch_features_tiled(
+                envelope=envelope,
+                tiles_per_side=2,
+                max_pages=max_pages,
+                feedback=feedback,
+            )
+        except ValueError as exc_tile2:
+            if not _looks_like_pagination_failure(str(exc_tile2)):
+                raise
+
+            _notify_log(
+                feedback,
+                "[FALLBACK] Tiling 2x2 ancora insufficiente; passo a 4x4...",
+            )
+            features = client.fetch_features_tiled(
+                envelope=envelope,
+                tiles_per_side=4,
+                max_pages=max_pages,
+                feedback=feedback,
+            )
 
     if not features:
         raise ValueError(

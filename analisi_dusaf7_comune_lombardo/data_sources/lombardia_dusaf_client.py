@@ -426,6 +426,71 @@ def _fetch_page_with_retry(url, timeout, callback=None, feedback=None, page_labe
     raise ValueError("DUSAF page retry exhausted without a definite error.")
 
 
+def _split_envelope_into_grid(envelope, tiles_per_side):
+    """Split a validated envelope into ``tiles_per_side x tiles_per_side`` cells.
+
+    Returns a flat list of envelope dicts (no ``spatialReference``) suitable
+    for passing back into ``validate_envelope_32632`` and the spatial query.
+    The cells cover the original envelope exactly and do not overlap; features
+    that fall on a shared boundary may be returned by two adjacent tiles and
+    are deduplicated by the caller via OBJECTID.
+    """
+    xmin = float(envelope["xmin"])
+    ymin = float(envelope["ymin"])
+    xmax = float(envelope["xmax"])
+    ymax = float(envelope["ymax"])
+
+    width = xmax - xmin
+    height = ymax - ymin
+    dx = width / tiles_per_side
+    dy = height / tiles_per_side
+
+    tiles = []
+    for col in range(tiles_per_side):
+        for row in range(tiles_per_side):
+            tile_xmin = xmin + col * dx
+            tile_ymin = ymin + row * dy
+            tile_xmax = xmin + (col + 1) * dx if col < tiles_per_side - 1 else xmax
+            tile_ymax = ymin + (row + 1) * dy if row < tiles_per_side - 1 else ymax
+            tiles.append(
+                {
+                    "xmin": tile_xmin,
+                    "ymin": tile_ymin,
+                    "xmax": tile_xmax,
+                    "ymax": tile_ymax,
+                }
+            )
+    return tiles
+
+
+def _feature_object_id(feature):
+    """Extract the OBJECTID of an ArcGIS / GeoJSON feature, or ``None``.
+
+    Used by the tiled fetch to deduplicate features returned by multiple
+    adjacent tiles when they intersect the shared boundary.
+    """
+    if not isinstance(feature, dict):
+        return None
+
+    candidate_id = feature.get("id")
+    if candidate_id is not None:
+        try:
+            return int(candidate_id)
+        except (TypeError, ValueError):
+            pass
+
+    for container in ("properties", "attributes"):
+        attrs = feature.get(container)
+        if isinstance(attrs, dict):
+            for key in ("OBJECTID", "objectid", "OBJECTID_1"):
+                if key in attrs and attrs[key] is not None:
+                    try:
+                        return int(attrs[key])
+                    except (TypeError, ValueError):
+                        return attrs[key]
+    return None
+
+
 class LombardiaDusafClient:
     """Prepare and optionally execute isolated DUSAF 7 ArcGIS REST requests.
 
@@ -614,6 +679,116 @@ class LombardiaDusafClient:
             current_offset = new_offset
 
         return features
+
+    def fetch_features_tiled(
+        self,
+        envelope,
+        tiles_per_side,
+        out_fields=None,
+        max_pages=None,
+        max_features_per_tile=None,
+        timeout=60,
+        callback=None,
+        feedback=None,
+    ):
+        """Fetch DUSAF features by splitting an envelope into a grid of tiles.
+
+        Fallback strategy for envelopes large enough to trigger the RL
+        ArcGIS server's "Failed to execute query." on paginated reads.
+        Each tile is queried as its own (typically single-page) spatial
+        query; the per-tile feature lists are concatenated and deduplicated
+        by ``OBJECTID`` (features that intersect the tile boundary appear
+        in more than one tile).
+
+        Args:
+            envelope: ArcGIS REST envelope dict in EPSG:32632
+                (xmin/ymin/xmax/ymax).
+            tiles_per_side: Integer grid side. ``2`` produces 4 tiles,
+                ``3`` produces 9, etc. Must be >= 1.
+            out_fields, max_pages, timeout, callback, feedback:
+                Forwarded to ``fetch_features`` for each tile. The page
+                budget applies independently to each tile.
+            max_features_per_tile: Optional cap on a single tile's
+                feature count, mirroring ``max_features`` from
+                ``fetch_features``.
+
+        Returns:
+            list[dict]: Deduplicated GeoJSON-shaped feature dicts.
+        """
+        if envelope is None:
+            raise ValueError("DUSAF tiled fetch requires an envelope.")
+
+        try:
+            tiles_per_side = int(tiles_per_side)
+        except (TypeError, ValueError):
+            raise ValueError("tiles_per_side must be an integer >= 1.") from None
+        if tiles_per_side < 1:
+            raise ValueError("tiles_per_side must be >= 1.")
+
+        envelope = validate_envelope_32632(envelope)
+        tiles = _split_envelope_into_grid(envelope, tiles_per_side)
+
+        all_features = []
+        seen_object_ids = set()
+        tile_count = len(tiles)
+
+        for index, tile in enumerate(tiles, start=1):
+            _raise_if_canceled(feedback)
+            _notify(
+                callback=callback,
+                feedback=feedback,
+                message=(
+                    "DUSAF tile {idx}/{total} bbox=({xmin:.0f},{ymin:.0f}; "
+                    "{xmax:.0f},{ymax:.0f}) fetch..."
+                ).format(
+                    idx=index,
+                    total=tile_count,
+                    xmin=tile["xmin"],
+                    ymin=tile["ymin"],
+                    xmax=tile["xmax"],
+                    ymax=tile["ymax"],
+                ),
+            )
+
+            tile_features = self.fetch_features(
+                geometry=tile,
+                out_fields=out_fields,
+                start_offset=0,
+                max_pages=max_pages,
+                max_features=max_features_per_tile,
+                timeout=timeout,
+                callback=callback,
+                feedback=feedback,
+            )
+
+            added = 0
+            for feature in tile_features:
+                object_id = _feature_object_id(feature)
+                if object_id is None:
+                    # No OBJECTID available: keep the feature but cannot
+                    # dedupe it across tiles. This is rare for the RL DUSAF
+                    # schema where OBJECTID is always present.
+                    all_features.append(feature)
+                    added += 1
+                    continue
+                if object_id in seen_object_ids:
+                    continue
+                seen_object_ids.add(object_id)
+                all_features.append(feature)
+                added += 1
+
+            _notify(
+                callback=callback,
+                feedback=feedback,
+                message="DUSAF tile {idx}/{total}: {count} feature ({added} nuove dopo dedup).".format(
+                    idx=index,
+                    total=tile_count,
+                    count=len(tile_features),
+                    added=added,
+                ),
+            )
+
+        return all_features
 
     def fetch_validated_features(
         self,
