@@ -355,6 +355,77 @@ def _read_json_url(url, timeout):
         raise ValueError("DUSAF ArcGIS response is not valid JSON.") from exc
 
 
+_TRANSIENT_ERROR_HINTS = (
+    "failed to execute query",
+    "query failed",
+    "timeout",
+    "service unavailable",
+    "internal server error",
+    "i/o error",
+    "network error",
+    "request timed out",
+)
+
+_RETRY_MAX_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = 2.0
+
+
+def _is_transient_error(message):
+    """Return True when a ValueError message looks like a retryable failure."""
+    if not message:
+        return False
+    text = str(message).lower()
+    return any(hint in text for hint in _TRANSIENT_ERROR_HINTS)
+
+
+def _fetch_page_with_retry(url, timeout, callback=None, feedback=None, page_label=""):
+    """Read + validate one DUSAF page with retry on transient server errors.
+
+    The Regione Lombardia ArcGIS service occasionally returns a generic
+    ``"Failed to execute query."`` error on heavy queries (large Comuni
+    over many pagination steps) or on transient timeouts. We retry the
+    same page up to ``_RETRY_MAX_ATTEMPTS`` times with an arithmetic
+    backoff. Non-transient errors propagate immediately.
+    """
+    import time
+
+    last_error = None
+    for attempt in range(1, _RETRY_MAX_ATTEMPTS + 1):
+        try:
+            return validate_arcgis_json_response(_read_json_url(url, timeout=timeout))
+        except ValueError as exc:
+            last_error = exc
+            if not _is_transient_error(str(exc)):
+                raise
+
+            if attempt >= _RETRY_MAX_ATTEMPTS:
+                raise
+
+            backoff = _RETRY_BACKOFF_SECONDS * attempt
+            _notify(
+                callback=callback,
+                feedback=feedback,
+                message=(
+                    "DUSAF {label} tentativo {attempt}/{max_attempts} fallito "
+                    "({exc}); ritento tra {backoff:.0f}s..."
+                ).format(
+                    label=page_label or "page",
+                    attempt=attempt,
+                    max_attempts=_RETRY_MAX_ATTEMPTS,
+                    exc=str(exc).strip(),
+                    backoff=backoff,
+                ),
+            )
+
+            _raise_if_canceled(feedback)
+            time.sleep(backoff)
+
+    # Should never get here (loop returns or raises) but keep callers safe.
+    if last_error is not None:
+        raise last_error
+    raise ValueError("DUSAF page retry exhausted without a definite error.")
+
+
 class LombardiaDusafClient:
     """Prepare and optionally execute isolated DUSAF 7 ArcGIS REST requests.
 
@@ -480,8 +551,12 @@ class LombardiaDusafClient:
                 message="DUSAF fetch page {} at offset {}.".format(page_count + 1, current_offset),
             )
 
-            response_json = validate_arcgis_json_response(
-                _read_json_url(query_spec.as_url(), timeout=timeout)
+            response_json = _fetch_page_with_retry(
+                query_spec.as_url(),
+                timeout=timeout,
+                callback=callback,
+                feedback=feedback,
+                page_label="page {} at offset {}".format(page_count + 1, current_offset),
             )
 
             if "features" not in response_json:

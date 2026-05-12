@@ -116,6 +116,28 @@ def _normalize_comune_key(value):
     return text.casefold()
 
 
+_DIALOG_OUTPUT_LAYER_PREFIXES = (
+    "DUSAF7 ",
+    "Confine ",
+    "QC slivers ",
+    "Com_REST_",
+)
+
+
+def _looks_like_workflow_output(layer):
+    """Return True when ``layer`` looks like a previous workflow output.
+
+    Kept in sync with ``analisi_dusaf7_comune_lombardo_algorithm._looks_like_output_layer``
+    so the dialog status panel agrees with the algorithm's own detection
+    (otherwise the panel would show a misleading "layer di progetto" badge
+    pointing at an output of a previous run).
+    """
+    if layer is None:
+        return False
+    name = layer.name() or ""
+    return any(name.startswith(p) for p in _DIALOG_OUTPUT_LAYER_PREFIXES)
+
+
 def _has_field(layer, candidates):
     """Return True when ``layer`` exposes at least one of ``candidates``."""
     if layer is None or not layer.isValid():
@@ -131,14 +153,16 @@ def _has_field(layer, candidates):
 def _find_project_layer(name_candidates, required_fields):
     """Look for a vector layer in the active project matching name OR fields.
 
-    The check mirrors the algorithm's own detection heuristics so the dialog
-    status reflects what the workflow would actually use.
+    Skips layers that look like outputs of a previous run, so the dialog
+    badge agrees with the algorithm's own detection.
     """
     project = QgsProject.instance()
-    lowered_names = {n.lower() for n in name_candidates}
 
     for layer in project.mapLayers().values():
         if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+            continue
+
+        if _looks_like_workflow_output(layer):
             continue
 
         layer_name = layer.name().lower()
@@ -158,9 +182,6 @@ def _find_project_layer(name_candidates, required_fields):
 
         if not required_fields and name_match:
             return layer
-
-    if not lowered_names:
-        return None
 
     return None
 
