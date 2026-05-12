@@ -19,6 +19,39 @@ from ..data_sources import (
 from ..data_sources.comuni_list_cache import ComuniListCache
 
 
+_DUSAF_DESCR_SEPARATOR = " - "
+
+
+def _parse_dusaf_descr(descr_raw):
+    """Split a DUSAF ``DESCR`` value into ``(code, description)``.
+
+    The Regione Lombardia REST service only exposes ``DESCR`` and packs the
+    DUSAF class code in the prefix, for example
+    ``"1111 - tessuto residenziale denso"``. The desktop workflow expects
+    ``COD_TOT`` and ``DESCR`` to be separate columns, so we synthesise them
+    here. When the separator is missing the code is left empty and the raw
+    text is kept as the description so the caller can still inspect the data.
+    """
+    if not isinstance(descr_raw, str):
+        return "", ""
+
+    text = descr_raw.strip()
+    if not text:
+        return "", ""
+
+    if _DUSAF_DESCR_SEPARATOR in text:
+        code, _, description = text.partition(_DUSAF_DESCR_SEPARATOR)
+        return code.strip(), description.strip()
+
+    head = text.split(None, 1)
+    if head and head[0].isdigit():
+        if len(head) == 2:
+            return head[0], head[1].strip()
+        return head[0], ""
+
+    return "", text
+
+
 def get_comuni_list_for_autocomplete(cache_manager=None, force_refresh=False, feedback=None):
     """Return the lightweight ``(properties_dicts, source_label)`` Comuni list.
 
@@ -78,9 +111,14 @@ def fetch_dusaf_layer_for_envelope(envelope, feedback=None, max_pages=None, max_
     ``envelope`` is a dictionary with ``xmin``, ``ymin``, ``xmax``, ``ymax``
     keys (or a 4-tuple in the same order). The function returns a memory
     layer with all the DUSAF features intersecting that envelope.
+
+    The Regione Lombardia DUSAF service only exposes ``OBJECTID``, ``Shape``
+    and ``DESCR`` via REST: the ``COD_TOT`` column that the desktop workflow
+    relies on is packed into the ``DESCR`` prefix. We unpack it here so the
+    rest of the algorithm and the QML categorised renderer can keep working.
     """
     client = LombardiaDusafClient()
-    features = client.fetch_validated_features(
+    features = client.fetch_features(
         geometry=envelope,
         feedback=feedback,
         max_pages=max_pages,
@@ -92,8 +130,35 @@ def fetch_dusaf_layer_for_envelope(envelope, feedback=None, max_pages=None, max_
             "Nessuna feature DUSAF restituita dal servizio REST per l'envelope richiesto."
         )
 
+    enriched = []
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+
+        properties = feature.get("properties")
+        container_key = "properties"
+        if not isinstance(properties, dict):
+            attributes = feature.get("attributes")
+            if isinstance(attributes, dict):
+                properties = attributes
+                container_key = "attributes"
+            else:
+                properties = {}
+                container_key = "properties"
+
+        properties = dict(properties)
+        descr_raw = properties.get("DESCR", "")
+        cod_tot, descr_clean = _parse_dusaf_descr(descr_raw)
+        properties["COD_TOT"] = cod_tot
+        properties["DESCR"] = descr_clean or descr_raw
+        properties["DESCR_RAW"] = descr_raw
+
+        new_feature = dict(feature)
+        new_feature[container_key] = properties
+        enriched.append(new_feature)
+
     return geojson_features_to_memory_layer(
-        features,
+        enriched,
         layer_name="DUSAF7_REST",
         crs_authid="EPSG:32632",
         geometry_type="MultiPolygon",
