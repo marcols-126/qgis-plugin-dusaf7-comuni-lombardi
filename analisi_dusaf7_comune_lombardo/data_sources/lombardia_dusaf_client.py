@@ -479,6 +479,11 @@ class LombardiaDusafClient:
             "resultRecordCount": self.page_size,
             "resultOffset": validate_offset(offset),
             "outSR": "32632",
+            # Many ArcGIS REST services require an explicit orderByFields
+            # for stable pagination on spatial queries; without it
+            # ``resultOffset > 0`` returns a generic
+            # "Failed to execute query." error on large Comuni.
+            "orderByFields": "OBJECTID ASC",
         }
 
         if geometry is not None:
