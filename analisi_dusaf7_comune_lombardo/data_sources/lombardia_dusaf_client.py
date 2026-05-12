@@ -366,8 +366,10 @@ _TRANSIENT_ERROR_HINTS = (
     "request timed out",
 )
 
-_RETRY_MAX_ATTEMPTS = 3
-_RETRY_BACKOFF_SECONDS = 2.0
+_RETRY_MAX_ATTEMPTS = 5
+_RETRY_BACKOFF_SECONDS = 3.0
+_TILED_INTER_TILE_PAUSE_SECONDS = 0.8
+_TILED_DEFERRED_RETRY_PAUSE_SECONDS = 30.0
 
 
 def _is_transient_error(message):
@@ -725,22 +727,28 @@ class LombardiaDusafClient:
         if tiles_per_side < 1:
             raise ValueError("tiles_per_side must be >= 1.")
 
+        import time
+
         envelope = validate_envelope_32632(envelope)
         tiles = _split_envelope_into_grid(envelope, tiles_per_side)
 
         all_features = []
         seen_object_ids = set()
+        deferred = []
         tile_count = len(tiles)
 
-        for index, tile in enumerate(tiles, start=1):
+        def _try_tile(index, tile, is_deferred=False):
+            """Fetch one tile, dedupe and append. Returns True on success."""
             _raise_if_canceled(feedback)
+            prefix = "DUSAF retry tile" if is_deferred else "DUSAF tile"
             _notify(
                 callback=callback,
                 feedback=feedback,
                 message=(
-                    "DUSAF tile {idx}/{total} bbox=({xmin:.0f},{ymin:.0f}; "
+                    "{prefix} {idx}/{total} bbox=({xmin:.0f},{ymin:.0f}; "
                     "{xmax:.0f},{ymax:.0f}) fetch..."
                 ).format(
+                    prefix=prefix,
                     idx=index,
                     total=tile_count,
                     xmin=tile["xmin"],
@@ -765,9 +773,6 @@ class LombardiaDusafClient:
             for feature in tile_features:
                 object_id = _feature_object_id(feature)
                 if object_id is None:
-                    # No OBJECTID available: keep the feature but cannot
-                    # dedupe it across tiles. This is rare for the RL DUSAF
-                    # schema where OBJECTID is always present.
                     all_features.append(feature)
                     added += 1
                     continue
@@ -780,13 +785,65 @@ class LombardiaDusafClient:
             _notify(
                 callback=callback,
                 feedback=feedback,
-                message="DUSAF tile {idx}/{total}: {count} feature ({added} nuove dopo dedup).".format(
+                message="{prefix} {idx}/{total}: {count} feature ({added} nuove dopo dedup).".format(
+                    prefix=prefix,
                     idx=index,
                     total=tile_count,
                     count=len(tile_features),
                     added=added,
                 ),
             )
+            return True
+
+        # First pass: try every tile. Failures are deferred.
+        for index, tile in enumerate(tiles, start=1):
+            _raise_if_canceled(feedback)
+            try:
+                _try_tile(index, tile, is_deferred=False)
+            except ValueError as exc:
+                if not _is_transient_error(str(exc)):
+                    raise
+                _notify(
+                    callback=callback,
+                    feedback=feedback,
+                    message=(
+                        "DUSAF tile {idx}/{total}: ESAURITI tentativi. Verra' "
+                        "ritentato in coda dopo pausa di {pause:.0f}s."
+                    ).format(
+                        idx=index,
+                        total=tile_count,
+                        pause=_TILED_DEFERRED_RETRY_PAUSE_SECONDS,
+                    ),
+                )
+                deferred.append((index, tile))
+
+            # Small pause between tiles to avoid hammering the server.
+            if index < tile_count and _TILED_INTER_TILE_PAUSE_SECONDS > 0:
+                _raise_if_canceled(feedback)
+                time.sleep(_TILED_INTER_TILE_PAUSE_SECONDS)
+
+        # Second pass: retry the deferred tiles after a longer cool-down.
+        if deferred:
+            _notify(
+                callback=callback,
+                feedback=feedback,
+                message=(
+                    "DUSAF retry coda: {count} tile da ritentare dopo "
+                    "{pause:.0f}s di pausa..."
+                ).format(
+                    count=len(deferred),
+                    pause=_TILED_DEFERRED_RETRY_PAUSE_SECONDS,
+                ),
+            )
+            slept = 0.0
+            while slept < _TILED_DEFERRED_RETRY_PAUSE_SECONDS:
+                _raise_if_canceled(feedback)
+                step = min(1.0, _TILED_DEFERRED_RETRY_PAUSE_SECONDS - slept)
+                time.sleep(step)
+                slept += step
+
+            for index, tile in deferred:
+                _try_tile(index, tile, is_deferred=True)
 
         return all_features
 
