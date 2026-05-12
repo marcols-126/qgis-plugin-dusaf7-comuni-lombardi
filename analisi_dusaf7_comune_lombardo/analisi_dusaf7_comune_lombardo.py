@@ -33,12 +33,11 @@ __revision__ = '$Format:%H$'
 import os
 import sys
 import inspect
-import processing
 
 from qgis.PyQt.QtWidgets import QAction
 from qgis.PyQt.QtGui import QIcon
 
-from qgis.core import QgsProcessingAlgorithm, QgsApplication
+from qgis.core import QgsApplication
 from .analisi_dusaf7_comune_lombardo_provider import AnalisiDusaf7ComuneLombardoPluginProvider
 
 cmd_folder = os.path.split(inspect.getfile(inspect.currentframe()))[0]
@@ -53,6 +52,7 @@ class AnalisiDusaf7ComuneLombardoPluginPlugin(object):
         self.iface = iface
         self.provider = None
         self.action = None
+        self._dialog = None
 
     def initProcessing(self):
         """Init Processing provider for QGIS >= 3.8."""
@@ -60,11 +60,22 @@ class AnalisiDusaf7ComuneLombardoPluginPlugin(object):
         QgsApplication.processingRegistry().addProvider(self.provider)
 
     def open_algorithm_dialog(self):
-        """Apre la GUI dell'algoritmo Processing del plugin."""
-        processing.execAlgorithmDialog(
-        "Analisi DUSAF 7:analisi_dusaf7_comune_lombardo",
-        {}
-    )
+        """Apre il dialog principale del plugin.
+
+        Sostituisce il vecchio form Processing aperto direttamente: l'algoritmo
+        rimane disponibile in Processing Toolbox per modelli e script.
+        """
+        from .ui import DusafMainDialog
+
+        # Reusing the same instance keeps the log and the cached comuni list
+        # populated across reopen events; the user can run the workflow many
+        # times without re-fetching the autocomplete.
+        if self._dialog is None:
+            self._dialog = DusafMainDialog(self.iface)
+
+        self._dialog.show()
+        self._dialog.raise_()
+        self._dialog.activateWindow()
     
     def initGui(self):
         self.initProcessing()
@@ -89,6 +100,14 @@ class AnalisiDusaf7ComuneLombardoPluginPlugin(object):
         self.iface.addPluginToMenu("Analisi DUSAF 7", self.action)
 
     def unload(self):
+        if self._dialog is not None:
+            try:
+                self._dialog.close()
+                self._dialog.deleteLater()
+            except Exception:
+                pass
+            self._dialog = None
+
         if self.action is not None:
             self.iface.removeToolBarIcon(self.action)
             self.iface.removePluginMenu("Analisi DUSAF 7", self.action)

@@ -4,26 +4,68 @@
 
 [general]
 name=Analisi DUSAF 7 Comune Lombardo
-qgisMinimumVersion=3.40
-description=Analisi DUSAF 7 per Comuni lombardi con QC-4
-version=0.1.0
+qgisMinimumVersion=3.34
+description=Automated DUSAF 7 land-use analysis for Lombardy municipalities via Regione Lombardia REST services. QC-4 audit, GeoPackage + CSV export. (Plugin regionale italiano.)
+version=0.2.3
 author=Marco Stefano La Sala
 email=214729081+marcols-126@users.noreply.github.com
 
-about=Plugin QGIS per l'analisi automatizzata dell'uso del suolo nei Comuni lombardi tramite DUSAF 7.0 e confini amministrativi ISTAT 2026. Il plugin registra un provider Processing dedicato e consente di eseguire il flusso di lavoro completo: validazione dei layer DUSAF7 e Com01012026_WGS84, correzione geometrie, riproiezione in EPSG:32632, clip sul Comune selezionato, controllo slivers, calcolo delle superfici in m², ettari e percentuali, audit QC-4 ed esportazione di GeoPackage e CSV. Il flusso è pensato per supportare istruttorie urbanistiche e analisi preliminari PGT, mantenendo tracciabilità del dato e segnalazione delle discrepanze nel log di Processing.
+about=English - QGIS plugin for automated land-use analysis in the municipalities of Lombardy (Italy), based on the DUSAF 7.0 dataset of Regione Lombardia and the official administrative boundaries.
+    Unlike traditional plugins it does NOT require manual pre-loading of layers: data is fetched on-the-fly from the Regione Lombardia ArcGIS REST services, with automatic caching in the QGIS profile. Optionally, ISTAT 2026 boundaries can be enabled as the authoritative source.
+    Workflow: Comune validation, geometry fix, EPSG:32632 reprojection, DUSAF clipping on the municipal perimeter, slivers handling, dissolve by land-use class, area calculation (m^2, hectares, percentages), and a QC-4 audit with area-conservation check.
+    Output: multilayer GeoPackage with applied QML styles + CSV summary per class. A memory-only mode is available for quick analyses without writing files.
+    Compatibility: QGIS 3.34 -> 4.99, Qt5 and Qt6.
+    ---
+    Italiano - Plugin QGIS per l'analisi automatica dell'uso del suolo nei Comuni lombardi, basato sul dataset DUSAF 7.0 di Regione Lombardia e sui confini amministrativi ufficiali.
+    A differenza dei plugin tradizionali NON richiede il pre-caricamento manuale dei layer: i dati vengono scaricati al volo dai servizi REST ufficiali di Regione Lombardia (ArcGIS Server), con cache automatica nel profilo QGIS. Opzionalmente e' possibile attivare i confini ISTAT 2026 come fonte autoritativa.
+    Workflow: validazione del Comune, fix geometrie, riproiezione EPSG:32632, clip DUSAF sul perimetro, gestione slivers, dissolve per classe, calcolo superfici (m^2, ettari, percentuali) e audit QC-4 con controllo conservazione delle aree.
+    Output: GeoPackage multilayer con stili QML applicati + CSV riepilogativo per classe. Modalita memoria disponibile per analisi rapide senza scrivere file.
+    Compatibilita: QGIS 3.34 -> 4.99, Qt5 e Qt6. Pensato per istruttorie urbanistiche e analisi PGT.
 
 tracker=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi/issues
 repository=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi
 
 hasProcessingProvider=yes
-# changelog=
 
-tags=DUSAF, QGIS, PyQGIS, Lombardia, PGT, consumo-suolo, QC-4, Processing
+changelog=0.2.3 (2026-05-12)
+        - Add LICENSE file (no extension) at the plugin root so the QGIS
+          Plugin Repository validator stops complaining
+          ("Cannot find LICENSE in the plugin package").
+        - Content is the same AGPL-3.0 text already in LICENSE.txt.
+    0.2.2 (2026-05-12)
+        - Metadata description and about now bilingual (English + Italian)
+          to satisfy the QGIS Plugin Repository review checklist
+        - Extended tags with English variants for international discoverability
+    0.2.1 (2026-05-12)
+        - Metadata polish for plugins.qgis.org submission
+        - Multi-version changelog and removal of qgisMaximumVersion
+    0.2.0 (2026-05-12)
+        - Workflow REST-driven: scarica al volo DUSAF 7 e confini comunali
+          dai servizi ufficiali Regione Lombardia, senza pre-caricamento
+          manuale di layer
+        - Nuovo dialog: autocomplete Comune case-insensitive, log live con
+          progress bar, 3 modalita output (memoria / cartella progetto /
+          cartella personalizzata)
+        - Setup ISTAT 2026 opzionale per confini autoritativi
+        - Cache locale lista Comuni (TTL 30 giorni) per autocomplete istantaneo
+        - Compatibilita estesa: QGIS 3.34 -> 4.99, Qt5 e Qt6
+        - Robustezza REST: retry adattivo, bbox tiling, deferred retry per
+          Comuni grandi (Milano funziona end-to-end)
+        - Back-compat: se DUSAF7 e Com01012026_WGS84 sono gia caricati nel
+          progetto, vengono usati al posto del fetch REST con pre-filtro bbox
+        - Parsing intelligente di DUSAF DESCR (estrae COD_TOT dal prefisso)
+        - 97 test pure-python per validatori e parser
+        - Nuova icona Lombardia uso-suolo (43 KB, era 5.7 MB)
+    0.1.0 (2026-05-09)
+        - Versione iniziale (Plugin Builder skeleton + workflow base)
+        - Richiedeva pre-caricamento manuale di DUSAF7 e Com01012026_WGS84
+
+tags=dusaf, lombardia, lombardy, comuni, municipalities, uso del suolo, land use, pgt, consumo di suolo, soil consumption, qc-4, processing, rest, arcgis, regione lombardia, istat, italy, italia
 
 homepage=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi
 category=Vector
 icon=icon.png
-experimental=False
+experimental=True
 deprecated=False
 
 # plugin_dependencies=

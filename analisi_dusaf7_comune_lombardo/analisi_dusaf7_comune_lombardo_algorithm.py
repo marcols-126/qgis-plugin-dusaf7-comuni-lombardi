@@ -2,17 +2,12 @@
 
 import os
 import re
-import csv
 from datetime import datetime
 
-import processing
-
-from qgis.PyQt.QtCore import QVariant, Qt, QStringListModel
+from qgis.PyQt.QtCore import Qt, QStringListModel
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCompleter,
-    QDialog,
-    QDialogButtonBox,
     QLabel,
     QLineEdit,
     QVBoxLayout,
@@ -26,21 +21,38 @@ except Exception:
 
 from qgis.core import (
     QgsApplication,
-    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
     QgsFeatureRequest,
-    QgsField,
     QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingOutputFile,
+    QgsProcessingParameterBoolean,
     QgsProcessingParameterNumber,
     QgsProcessingParameterString,
-    QgsProcessingUtils,
     QgsProject,
-    QgsVectorFileWriter,
+    QgsRectangle,
     QgsVectorLayer,
-    edit,
 )
+
+from .data_sources import normalize_comune_display_name
+from .workflow import pipeline, qc, output
+from .workflow.data_resolver import (
+    envelope_from_layer_extent,
+    fetch_comune_geometry_layer,
+    fetch_dusaf_layer_for_envelope,
+    get_comuni_list_for_autocomplete,
+    load_comuni_layer_from_istat_cache,
+)
+from .workflow.output import (
+    STYLE_CONFINE,
+    STYLE_DUSAF_CLIP_QC,
+    STYLE_DUSAF_FINAL,
+    STYLE_FOLDER_NAME,
+    STYLE_SLIVERS,
+)
+from .workflow.pipeline import target_crs
+from .workflow.qc import AUDIT_TOLERANCE_M2
 
 
 # =============================================================================
@@ -53,35 +65,7 @@ COMUNI_REQUIRED_LAYER_NAME = "Com01012026_WGS84"
 DUSAF_CLASS_FIELD = "COD_TOT"
 DUSAF_DESC_FIELD = "DESCR"
 
-TARGET_CRS = QgsCoordinateReferenceSystem("EPSG:32632")
-AUDIT_TOLERANCE_M2 = 1.0
-
-URL_CONFINI_ISTAT_2026 = (
-    "https://www.istat.it/notizia/confini-delle-unita-amministrative-a-fini-statistici-al-1-gennaio-2018-2/"
-)
-
-URL_DUSAF7_RL = (
-    "https://www.geoportale.regione.lombardia.it/download-pacchetti?"
-    "p_p_id=dwnpackageportlet_WAR_gptdownloadportlet&"
-    "p_p_lifecycle=0&"
-    "p_p_state=normal&"
-    "p_p_mode=view&"
-    "_dwnpackageportlet_WAR_gptdownloadportlet_metadataid=r_lombar%3A7cd05e9f-b693-4d7e-a8de-71b40b45f54e&"
-    "_jsfBridgeRedirect=true"
-)
-
-PRE_RUN_ALERT = (
-    "ATTENZIONE: prima di eseguire lo strumento è necessario scaricare, estrarre e caricare "
-    "nel progetto QGIS i dati di base: DUSAF7 di Regione Lombardia e Confini amministrativi "
-    "ISTAT 2026 Com01012026_WGS84. Senza questi layer lo strumento non può funzionare correttamente."
-)
-
-STYLE_FOLDER_NAME = "stili"
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-STYLE_DUSAF_FINAL = "DUSAF7 - superfici.qml"
-STYLE_DUSAF_CLIP_QC = "DUSAF7 - clip QC.qml"
-STYLE_CONFINE = "Confine.qml"
-STYLE_SLIVERS = "QC slivers DUSAF7.qml"
 
 MUNICIPALITY_FIELD_CANDIDATES = [
     "COMUNE",
@@ -117,8 +101,6 @@ REGION_NAME_FIELD_CANDIDATES = [
     "NOME_REG",
     "nome_reg",
 ]
-
-_PREREQUISITE_DIALOG_SHOWN = False
 
 
 # =============================================================================
@@ -195,6 +177,14 @@ def _find_project_layer_by_name_and_fields(layer_name, required_fields=None, all
     return None
 
 
+OUTPUT_LAYER_NAME_PREFIXES = (
+    "DUSAF7 ",
+    "Confine ",
+    "QC slivers ",
+    "Com_REST_",
+)
+
+
 def _find_dusaf_project_layer():
     candidates = [
         DUSAF_REQUIRED_LAYER_NAME,
@@ -209,15 +199,33 @@ def _find_dusaf_project_layer():
             required_fields=[DUSAF_CLASS_FIELD, DUSAF_DESC_FIELD],
             allow_contains=True,
         )
-        if layer:
+        if layer and not _looks_like_output_layer(layer):
             return layer
 
     for layer in QgsProject.instance().mapLayers().values():
-        if isinstance(layer, QgsVectorLayer) and layer.isValid():
-            if _layer_has_fields(layer, [DUSAF_CLASS_FIELD, DUSAF_DESC_FIELD]):
-                return layer
+        if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+            continue
+        if _looks_like_output_layer(layer):
+            continue
+        if _layer_has_fields(layer, [DUSAF_CLASS_FIELD, DUSAF_DESC_FIELD]):
+            return layer
 
     return None
+
+
+def _looks_like_output_layer(layer):
+    """Return True when ``layer`` looks like a previous workflow output.
+
+    Excluding these layers from project-layer detection prevents the
+    algorithm from picking, for example, the ``Confine Zibido San Giacomo
+    fix`` layer of a previous run as the Comuni source. Previous outputs
+    carry attribute fields inherited from ISTAT (DEN_COM, COD_REG, ...)
+    so a plain field-based heuristic would happily match them.
+    """
+    if layer is None:
+        return False
+    name = layer.name() or ""
+    return any(name.startswith(p) for p in OUTPUT_LAYER_NAME_PREFIXES)
 
 
 def _find_comuni_project_layer():
@@ -235,102 +243,22 @@ def _find_comuni_project_layer():
             required_fields=[],
             allow_contains=True,
         )
-        if layer and _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES):
+        if (
+            layer
+            and not _looks_like_output_layer(layer)
+            and _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES)
+        ):
             return layer
 
     for layer in QgsProject.instance().mapLayers().values():
-        if isinstance(layer, QgsVectorLayer) and layer.isValid():
-            if _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES):
-                return layer
+        if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+            continue
+        if _looks_like_output_layer(layer):
+            continue
+        if _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES):
+            return layer
 
     return None
-
-
-def _show_prerequisite_dialog():
-    global _PREREQUISITE_DIALOG_SHOWN
-
-    if _PREREQUISITE_DIALOG_SHOWN:
-        return
-
-    _PREREQUISITE_DIALOG_SHOWN = True
-
-    parent = QApplication.activeWindow()
-
-    dialog = QDialog(parent)
-    dialog.setWindowTitle("Prerequisiti obbligatori - Analisi DUSAF 7")
-    dialog.setMinimumWidth(720)
-
-    layout = QVBoxLayout(dialog)
-
-    label = QLabel()
-    label.setTextFormat(Qt.RichText)
-    label.setOpenExternalLinks(True)
-    label.setWordWrap(True)
-    label.setText(
-        f"""
-        <h2 style="color:#cc0000;">ATTENZIONE - DATI OBBLIGATORI</h2>
-
-        <p>
-        Prima di proseguire con l'interfaccia dello strumento, verifica di avere scaricato
-        i dati di base, di averli salvati o estratti nella cartella del progetto QGIS
-        e di avere caricato nel progetto solo i layer necessari.
-        </p>
-
-        <h3>1. Confini amministrativi ISTAT 2026</h3>
-        <p>
-        Scarica i confini amministrativi dal link:
-        <br>
-        <a href="{URL_CONFINI_ISTAT_2026}">
-        {URL_CONFINI_ISTAT_2026}
-        </a>
-        </p>
-        <p>
-        Dopo il download, estrai tutto il contenuto nella cartella del progetto QGIS
-        e carica nel progetto il layer:
-        <br>
-        <b>{COMUNI_REQUIRED_LAYER_NAME}</b>
-        </p>
-
-        <h3>2. DUSAF 7 - Regione Lombardia</h3>
-        <p>
-        Scarica DUSAF 7 dal Geoportale di Regione Lombardia:
-        <br>
-        <a href="{URL_DUSAF7_RL}">
-        Scarica DUSAF 7 - Regione Lombardia
-        </a>
-        </p>
-        <p>
-        Dopo il download, estrai tutto il contenuto nella cartella del progetto QGIS
-        e carica nel progetto il layer:
-        <br>
-        <b>{DUSAF_REQUIRED_LAYER_NAME}</b>
-        </p>
-
-        <h3>Prima di premere OK</h3>
-        <ul>
-            <li>Il progetto QGIS deve essere salvato.</li>
-            <li>Il layer <b>{DUSAF_REQUIRED_LAYER_NAME}</b> deve essere già caricato nel progetto.</li>
-            <li>Il layer <b>{COMUNI_REQUIRED_LAYER_NAME}</b> deve essere già caricato nel progetto.</li>
-            <li>Gli stili QML vengono cercati nella cartella <b>stili</b> del progetto e, se assente, nella cartella <b>stili</b> del plugin.</li>
-        </ul>
-
-        <p>
-        Premi <b>OK</b> solo dopo avere completato questi passaggi.
-        </p>
-        """
-    )
-
-    layout.addWidget(label)
-
-    button_box = QDialogButtonBox(QDialogButtonBox.Ok)
-    button_box.button(QDialogButtonBox.Ok).setText("OK, prosegui")
-    button_box.accepted.connect(dialog.accept)
-    layout.addWidget(button_box)
-
-    if hasattr(dialog, "exec_"):
-        dialog.exec_()
-    else:
-        dialog.exec()
 
 
 # =============================================================================
@@ -340,8 +268,9 @@ def _show_prerequisite_dialog():
 class ComuneAutocompleteWidgetWrapper(WidgetWrapper):
 
     def createWidget(self):
-        _show_prerequisite_dialog()
-
+        # Phase 3: the modal prerequisite popup is no longer shown. The alert
+        # label below the line edit now communicates the actual data source
+        # (project layer vs REST/cache) without forcing a modal interruption.
         self._valid_names = []
         self._valid_name_by_norm = {}
 
@@ -390,16 +319,7 @@ class ComuneAutocompleteWidgetWrapper(WidgetWrapper):
             layer = _find_comuni_project_layer()
 
             if layer is None or not layer.isValid():
-                self._valid_names = []
-                self._valid_name_by_norm = {}
-                self._model.setStringList([])
-                self._set_alert(
-                    "<b>Comune non verificabile.</b> Caricare prima il layer "
-                    f"<b>{COMUNI_REQUIRED_LAYER_NAME}</b> nel progetto QGIS.",
-                    color="#990000",
-                    background="#fff0f0",
-                    border="#cc0000",
-                )
+                self._populate_completer_from_rest()
                 return
 
             municipality_field = _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES)
@@ -474,14 +394,71 @@ class ComuneAutocompleteWidgetWrapper(WidgetWrapper):
                 border="#cc0000",
             )
 
+    def _populate_completer_from_rest(self):
+        """Fallback when no Comuni layer is loaded: fetch the list from
+        the Regione Lombardia REST service (cached in the QGIS profile)."""
+        try:
+            self._set_alert(
+                "Nessun layer Comuni nel progetto: scarico la lista ufficiale "
+                "da Regione Lombardia (~3 sec la prima volta, poi in cache)...",
+                color="#5c4300",
+                background="#fff8e1",
+                border="#e0b400",
+            )
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.processEvents()
+
+            try:
+                comuni, source = get_comuni_list_for_autocomplete()
+            finally:
+                QApplication.restoreOverrideCursor()
+
+            display_names = sorted(
+                {
+                    normalize_comune_display_name(entry.get("NOME_COM", ""))
+                    for entry in comuni
+                    if entry.get("NOME_COM")
+                },
+                key=lambda x: x.lower(),
+            )
+
+            self._valid_names = display_names
+            self._valid_name_by_norm = {
+                _normalize_comune_value(name): name for name in self._valid_names
+            }
+            self._model.setStringList(self._valid_names)
+
+            origin = "cache locale" if source == "cache" else "servizio REST RL"
+            self._set_alert(
+                f"<b>Comuni caricati da {origin}</b> ({len(self._valid_names)} Comuni lombardi). "
+                "Digitare il nome e selezionare un valore dal menu a tendina.",
+                color="#5c4300",
+                background="#fff8e1",
+                border="#e0b400",
+            )
+
+            self._on_text_changed(self.value())
+
+        except Exception as exc:
+            self._valid_names = []
+            self._valid_name_by_norm = {}
+            self._model.setStringList([])
+            self._set_alert(
+                "<b>Comuni non disponibili.</b> Nessun layer nel progetto e fetch REST fallito: "
+                f"{exc}",
+                color="#990000",
+                background="#fff0f0",
+                border="#cc0000",
+            )
+
     def _on_text_changed(self, text):
         text = "" if text is None else str(text).strip()
         norm_text = _normalize_comune_value(text)
 
         if not self._valid_names:
             self._set_alert(
-                "<b>Comune non verificabile.</b> Caricare prima il layer "
-                f"<b>{COMUNI_REQUIRED_LAYER_NAME}</b>.",
+                "<b>Comune non verificabile.</b> Lista Comuni non disponibile "
+                "(nessun layer in progetto e fetch REST fallito).",
                 color="#990000",
                 background="#fff0f0",
                 border="#cc0000",
@@ -523,8 +500,8 @@ class ComuneAutocompleteWidgetWrapper(WidgetWrapper):
             )
         else:
             self._set_alert(
-                "Comune non valido. Il valore digitato non corrisponde a un Comune lombardo presente "
-                f"nel layer <b>{COMUNI_REQUIRED_LAYER_NAME}</b>.",
+                "Comune non valido. Il valore digitato non corrisponde a un Comune lombardo "
+                "tra quelli noti dalla sorgente attiva.",
                 color="#990000",
                 background="#fff0f0",
                 border="#cc0000",
@@ -557,6 +534,8 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
 
     COMUNE_NAME = "COMUNE_NAME"
     SLIVER_MIN_AREA_M2 = "SLIVER_MIN_AREA_M2"
+    OUTPUT_DIR_OVERRIDE = "OUTPUT_DIR_OVERRIDE"
+    SAVE_TO_DISK = "SAVE_TO_DISK"
 
     OUTPUT_GPKG = "OUTPUT_GPKG"
     OUTPUT_CSV = "OUTPUT_CSV"
@@ -580,94 +559,103 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         return f"""
         <h3>Analisi DUSAF 7 - Comune Lombardo</h3>
 
-        <div style="border:2px solid #cc0000; padding:12px; background-color:#fff3f3;">
-            <h2 style="color:#cc0000;">ATTENZIONE - DATI DA SCARICARE E CARICARE PRIMA DELL'ESECUZIONE</h2>
+        <p>
+        Calcolo automatico delle superfici per classe d'uso del suolo
+        (DUSAF 7) ritagliate sul perimetro di un Comune lombardo, con
+        Data Audit QC-4 ed export GeoPackage e CSV.
+        </p>
 
+        <div style="border:1px solid #3c8d3c; padding:10px; background-color:#eefbea;">
+            <h4 style="color:#006100; margin-top:0;">Dati: nessun layer richiesto in progetto</h4>
             <p>
-            Prima di utilizzare questo strumento è necessario scaricare i dati di base,
-            estrarre tutto il contenuto nella cartella del progetto QGIS e caricare nel progetto
-            solo i layer necessari.
+            Il plugin recupera automaticamente i dati necessari dai servizi
+            ufficiali Regione Lombardia ArcGIS REST:
             </p>
-
-            <h3>1. Confini amministrativi ISTAT 2026</h3>
-            <p>
-            <a href="{URL_CONFINI_ISTAT_2026}">
-            Scarica Confini amministrativi ISTAT 2026
-            </a>
-            </p>
-            <p>
-            Layer da caricare in QGIS:
-            <br>
-            <b>{COMUNI_REQUIRED_LAYER_NAME}</b>
-            </p>
-
-            <h3>2. DUSAF 7 - Regione Lombardia</h3>
-            <p>
-            <a href="{URL_DUSAF7_RL}">
-            Scarica DUSAF 7 - Regione Lombardia
-            </a>
-            </p>
-            <p>
-            Layer da caricare in QGIS:
-            <br>
-            <b>{DUSAF_REQUIRED_LAYER_NAME}</b>
-            </p>
-
-            <h3>Prerequisiti operativi</h3>
             <ul>
-                <li>Il progetto QGIS deve essere salvato.</li>
-                <li>Il layer <b>{DUSAF_REQUIRED_LAYER_NAME}</b> deve essere già caricato nel progetto.</li>
-                <li>Il layer <b>{COMUNI_REQUIRED_LAYER_NAME}</b> deve essere già caricato nel progetto.</li>
-                <li>Gli stili QML vengono cercati nella cartella <b>stili</b> del progetto e, se assente, nella cartella <b>stili</b> del plugin.</li>
+                <li>
+                    <b>Confini comunali</b> dal layer
+                    <i>Ambiti_Amministrativi_Lombardia</i> (download del solo
+                    Comune selezionato, ~10 KB).
+                </li>
+                <li>
+                    <b>DUSAF 7</b> dal layer <i>dusaf7</i> limitato al bounding
+                    box del Comune (poche centinaia di feature, ~MB).
+                </li>
             </ul>
-
             <p>
-            Il nome Comune deve corrispondere a un valore valido del layer
-            <b>{COMUNI_REQUIRED_LAYER_NAME}</b>. Lo strumento non procede se il Comune digitato
-            non è presente nell'elenco dei Comuni lombardi.
+            La lista dei 1500+ Comuni lombardi viene scaricata una volta sola
+            e mantenuta in cache nel profilo QGIS (TTL 30 giorni). Il primo
+            avvio richiede pochi secondi; gli avvii successivi sono istantanei.
             </p>
         </div>
 
-        <h4>Interfaccia utente</h4>
-        <ul>
-            <li>Nome del Comune da analizzare, con completamento automatico.</li>
-            <li>Area minima degli slivers in m².</li>
-        </ul>
-
+        <h4>Compatibilità con layer già caricati (back-compat)</h4>
         <p>
-        I layer <b>{DUSAF_REQUIRED_LAYER_NAME}</b> e <b>{COMUNI_REQUIRED_LAYER_NAME}</b>
-        vengono riconosciuti automaticamente dal progetto QGIS attivo.
+        Se nel progetto QGIS sono già presenti layer denominati
+        <b>{DUSAF_REQUIRED_LAYER_NAME}</b> e <b>{COMUNI_REQUIRED_LAYER_NAME}</b>
+        (oppure varianti con stessi campi), il plugin li usa al posto del fetch
+        REST. Comportamento identico alle versioni precedenti.
         </p>
 
-        <h4>Stili QML attesi</h4>
+        <h4>Parametri</h4>
         <ul>
-            <li><b>{STYLE_DUSAF_FINAL}</b></li>
-            <li><b>{STYLE_DUSAF_CLIP_QC}</b></li>
+            <li><b>Nome del Comune</b>: completamento automatico case-insensitive.</li>
+            <li><b>Area minima slivers</b>: soglia m² per segnalare frammenti residui di clip.</li>
+        </ul>
+
+        <h4>Prerequisiti</h4>
+        <ul>
+            <li>Il progetto QGIS deve essere <b>salvato</b> (gli output vanno nella cartella progetto).</li>
+            <li>Connessione internet attiva al primo avvio (cache REST).</li>
+        </ul>
+
+        <h4>Output</h4>
+        <p>
+        I file sono salvati nella sottocartella
+        <i>output_dusaf7_&lt;nome_comune&gt;/</i> del progetto:
+        </p>
+        <ul>
+            <li>GeoPackage con i layer: <i>superfici per classe</i>, <i>clip QC</i>, <i>confine</i>, <i>slivers</i>.</li>
+            <li>CSV riepilogativo (separator ; encoding UTF-8 BOM).</li>
+        </ul>
+        <p>
+        I quattro layer vengono anche caricati nel progetto con stili QML
+        applicati automaticamente (cartella <b>stili</b> del progetto, poi
+        del plugin):
+        </p>
+        <ul>
+            <li><b>{STYLE_DUSAF_FINAL}</b> (superfici - bordo rosso, fill trasparente)</li>
+            <li><b>{STYLE_DUSAF_CLIP_QC}</b> (categorizzato su {DUSAF_CLASS_FIELD})</li>
             <li><b>{STYLE_CONFINE}</b></li>
             <li><b>{STYLE_SLIVERS}</b></li>
         </ul>
 
-        <h4>Workflow</h4>
-        <ul>
-            <li>Verifica preliminare dei layer caricati.</li>
-            <li>Validazione del Comune selezionato.</li>
-            <li>Fix geometries sugli input.</li>
-            <li>Riproiezione in EPSG:32632.</li>
-            <li>Estrazione del Comune indicato.</li>
-            <li>Clip DUSAF sul perimetro comunale.</li>
-            <li>Fix geometries post-clip.</li>
-            <li>Gestione slivers con flag dedicato.</li>
+        <h4>Workflow (9 fasi)</h4>
+        <ol>
+            <li>Fix geometries Comuni.</li>
+            <li>Riproiezione Comuni in EPSG:32632.</li>
+            <li>Estrazione del Comune indicato (dissolve + fix).</li>
+            <li>Preparazione DUSAF (fetch REST se serve, fix, reproject).</li>
+            <li>Clip DUSAF sul perimetro comunale + slivers QC.</li>
             <li>Dissolve per classe DUSAF.</li>
-            <li>Calcolo superfici in m², ettari e percentuali.</li>
-            <li>Data Audit tra superficie DUSAF calcolata e superficie del perimetro comunale.</li>
-            <li>Esportazione GeoPackage e CSV nella cartella del progetto QGIS attivo.</li>
-        </ul>
+            <li>Data Audit QC-4 (tolleranza 1.0 m²).</li>
+            <li>Salvataggio GeoPackage + CSV.</li>
+            <li>Caricamento layer di output con stili.</li>
+        </ol>
 
         <h4>Configurazione fissa DUSAF - protocollo QC-4</h4>
         <ul>
             <li>Campo codice DUSAF: <b>{DUSAF_CLASS_FIELD}</b></li>
             <li>Campo descrizione DUSAF: <b>{DUSAF_DESC_FIELD}</b></li>
         </ul>
+
+        <p style="color:#666; font-size:90%;">
+        Nota tecnica: il servizio REST DUSAF di Regione Lombardia espone
+        DESCR ma non COD_TOT come campo separato. Il plugin parsa il codice
+        dal prefisso di DESCR (es: "1111 - tessuto residenziale denso").
+        Per la massima precisione LIV5 conviene comunque caricare nel
+        progetto il DUSAF7 desktop completo.
+        </p>
         """
 
     def initAlgorithm(self, config=None):
@@ -698,6 +686,22 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 minValue=0.0,
             )
         )
+
+        save_param = QgsProcessingParameterBoolean(
+            self.SAVE_TO_DISK,
+            "Salva GeoPackage e CSV su disco (deselezionare per layer solo in memoria)",
+            defaultValue=True,
+            optional=True,
+        )
+        self.addParameter(save_param)
+
+        output_dir_param = QgsProcessingParameterString(
+            self.OUTPUT_DIR_OVERRIDE,
+            "Cartella output personalizzata (vuoto = usa cartella del progetto)",
+            defaultValue="",
+            optional=True,
+        )
+        self.addParameter(output_dir_param)
 
         self.addOutput(QgsProcessingOutputFile(self.OUTPUT_GPKG, "GeoPackage di output"))
         self.addOutput(QgsProcessingOutputFile(self.OUTPUT_CSV, "CSV riepilogo superfici"))
@@ -745,31 +749,290 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             "Salva prima il progetto .qgz/.qgs per usare output relativi alla cartella del progetto."
         )
 
+    def _resolve_project_dir(self, override="", require=True):
+        """Resolve the directory used for output files and style lookup.
+
+        Resolution order:
+
+        1. ``override`` (when non-empty): used as-is, created if missing.
+        2. Saved project directory (``QgsProject.fileName()`` or
+           ``homePath()``).
+        3. When ``require=False`` and the previous steps failed, the system
+           temporary directory is returned: callers that do not write any
+           file (e.g. when ``SAVE_TO_DISK`` is False) can still resolve a
+           valid path for style lookups without forcing the user to save
+           the project.
+
+        Raises ``QgsProcessingException`` when ``require=True`` and no
+        valid directory can be derived.
+        """
+        if override:
+            override = os.path.abspath(override)
+            try:
+                os.makedirs(override, exist_ok=True)
+            except OSError as exc:
+                raise QgsProcessingException(
+                    f"Cartella di output non scrivibile: {override} ({exc})."
+                ) from exc
+            return override
+
+        project = QgsProject.instance()
+        if project.fileName():
+            return os.path.dirname(project.fileName())
+
+        home = project.homePath()
+        if home and str(home).strip() not in ("", "."):
+            return os.path.abspath(home)
+
+        if not require:
+            import tempfile
+            return tempfile.gettempdir()
+
+        raise QgsProcessingException(
+            "MANCA_DATO: il progetto QGIS non è salvato e non è stata "
+            "indicata una cartella di output personalizzata. "
+            "Salva il progetto, oppure indica una cartella nel parametro "
+            "'Cartella output personalizzata', oppure disattiva il "
+            "salvataggio su disco per ottenere solo layer in memoria."
+        )
+
     # -------------------------------------------------------------------------
     # LAYER E VALIDAZIONE COMUNE
     # -------------------------------------------------------------------------
 
-    def _get_required_dusaf_layer(self):
+    def _get_required_dusaf_layer(self, comune_geometry_layer=None, feedback=None, context=None):
+        """Return a DUSAF layer.
+
+        Priority: layer already loaded in the QGIS project (back-compat); when
+        not available the layer is fetched from the Regione Lombardia ArcGIS
+        REST service for the envelope of ``comune_geometry_layer`` and returned
+        as an in-memory layer in EPSG:32632.
+
+        When the project layer is used AND a Comune geometry is available, the
+        layer is pre-filtered to the Comune envelope via ``native:extractbyextent``
+        before being returned. This avoids running fix_geometries and reproject
+        on the entire Lombardia dataset (millions of features) when we only
+        need the subset that overlaps the selected Comune.
+        """
         layer = _find_dusaf_project_layer()
 
-        if layer is None or not layer.isValid():
+        if layer is not None and layer.isValid():
+            if feedback is not None:
+                feedback.pushInfo(f"[DATA] DUSAF da progetto: {layer.name()}")
+
+            if comune_geometry_layer is not None and context is not None:
+                try:
+                    prefiltered = self._prefilter_dusaf_by_envelope(
+                        layer, comune_geometry_layer, context, feedback
+                    )
+                    if prefiltered is not None:
+                        return prefiltered
+                except Exception as exc:
+                    if feedback is not None:
+                        self._warn(
+                            feedback,
+                            f"[WARN] Pre-filtro DUSAF al bbox del Comune fallito ({exc}). "
+                            "Procedo con il layer completo (più lento).",
+                        )
+
+            return layer
+
+        if comune_geometry_layer is None:
             raise QgsProcessingException(
-                f"MANCA_DATO: il layer '{DUSAF_REQUIRED_LAYER_NAME}' non è caricato nel progetto QGIS "
-                f"oppure non contiene i campi obbligatori '{DUSAF_CLASS_FIELD}' e '{DUSAF_DESC_FIELD}'."
+                f"MANCA_DATO: il layer '{DUSAF_REQUIRED_LAYER_NAME}' non è caricato nel progetto "
+                "e non posso interrogare il servizio REST senza una geometria del Comune."
             )
 
-        return layer
+        if feedback is not None:
+            feedback.pushInfo(
+                "[DATA] DUSAF non in progetto: fetch REST dal servizio Regione Lombardia "
+                "per l'envelope del Comune..."
+            )
 
-    def _get_required_comuni_layer(self):
+        envelope = envelope_from_layer_extent(comune_geometry_layer, padding_m=50.0)
+        try:
+            rest_layer = fetch_dusaf_layer_for_envelope(envelope, feedback=feedback)
+        except (ValueError, RuntimeError) as exc:
+            raise QgsProcessingException(
+                "REST: fetch DUSAF fallito dal servizio Regione Lombardia. "
+                f"Dettaglio: {exc}"
+            ) from exc
+
+        if not rest_layer.isValid():
+            raise QgsProcessingException(
+                "REST: il layer DUSAF in memoria risulta non valido dopo il fetch."
+            )
+
+        if feedback is not None:
+            feedback.pushInfo(
+                f"[DATA] DUSAF da REST: {rest_layer.featureCount()} feature in EPSG:32632."
+            )
+
+        return rest_layer
+
+    def _get_required_comuni_layer(self, comune_name=None, feedback=None):
+        """Return a Comuni layer.
+
+        Source resolution order:
+
+        1. Layer already loaded in the QGIS project (back-compat).
+        2. Cached ISTAT shapefile (when configured via the optional setup
+           dialog).
+        3. REST fetch of the single named Comune from Regione Lombardia
+           Ambiti_Amministrativi.
+
+        ``comune_name`` is only strictly required for the REST fallback.
+        """
         layer = _find_comuni_project_layer()
 
-        if layer is None or not layer.isValid():
+        if layer is not None and layer.isValid():
+            if feedback is not None:
+                feedback.pushInfo(f"[DATA] Comuni da progetto: {layer.name()}")
+            return layer
+
+        istat_layer = load_comuni_layer_from_istat_cache()
+        if istat_layer is not None:
+            if feedback is not None:
+                feedback.pushInfo(
+                    f"[DATA] Comuni da cache ISTAT: {istat_layer.source()}"
+                )
+            return istat_layer
+
+        if not comune_name:
             raise QgsProcessingException(
-                f"MANCA_DATO: il layer '{COMUNI_REQUIRED_LAYER_NAME}' non è caricato nel progetto QGIS "
-                "oppure non contiene un campo riconoscibile per il nome del Comune."
+                f"MANCA_DATO: il layer '{COMUNI_REQUIRED_LAYER_NAME}' non è caricato nel progetto, "
+                "nessuna cache ISTAT è configurata e nessun nome Comune è "
+                "disponibile per il fetch REST."
             )
 
-        return layer
+        if feedback is not None:
+            feedback.pushInfo(
+                f"[DATA] Comuni non in progetto: fetch REST del Comune '{comune_name}' "
+                "dal servizio Regione Lombardia Ambiti_Amministrativi..."
+            )
+
+        try:
+            rest_layer = fetch_comune_geometry_layer(comune_name, feedback=feedback)
+        except (ValueError, RuntimeError) as exc:
+            raise QgsProcessingException(
+                "REST: fetch geometria Comune fallito dal servizio Regione Lombardia. "
+                f"Dettaglio: {exc}"
+            ) from exc
+
+        if rest_layer is None:
+            raise QgsProcessingException(
+                f"REST: nessun Comune con nome '{comune_name}' trovato nel servizio "
+                "Regione Lombardia Ambiti_Amministrativi. Verificare la digitazione."
+            )
+
+        if not rest_layer.isValid():
+            raise QgsProcessingException(
+                "REST: il layer Comune in memoria risulta non valido dopo il fetch."
+            )
+
+        if feedback is not None:
+            feedback.pushInfo(
+                f"[DATA] Comune da REST: 1 feature in EPSG:32632 ({rest_layer.name()})."
+            )
+
+        return rest_layer
+
+    def _prefilter_dusaf_by_envelope(self, dusaf_layer, comune_geometry_layer, context, feedback):
+        """Extract only the DUSAF features inside the Comune envelope.
+
+        Optimisation for back-compat mode: when DUSAF7 is loaded as the full
+        Lombardia dataset, fix_geometries + reproject + clip would touch
+        millions of features for nothing. We pre-filter via
+        ``native:extractbyextent`` so the heavy steps only operate on the
+        subset that actually overlaps the selected Comune.
+
+        Returns the filtered layer (a Processing temporary output) or ``None``
+        when the optimisation cannot be applied. The caller is responsible
+        for falling back to the original layer when this returns ``None``.
+        """
+        if dusaf_layer is None or comune_geometry_layer is None:
+            return None
+
+        original_count = dusaf_layer.featureCount()
+        comune_extent = comune_geometry_layer.extent()
+        if comune_extent.isEmpty():
+            return None
+
+        src_crs = comune_geometry_layer.crs()
+        dst_crs = dusaf_layer.crs()
+
+        if src_crs.isValid() and dst_crs.isValid() and src_crs != dst_crs:
+            transform = QgsCoordinateTransform(
+                src_crs, dst_crs, QgsProject.instance().transformContext()
+            )
+            comune_extent = transform.transformBoundingBox(comune_extent)
+
+        padding = 0.001 if dst_crs.isGeographic() else 50.0
+        padded = QgsRectangle(
+            comune_extent.xMinimum() - padding,
+            comune_extent.yMinimum() - padding,
+            comune_extent.xMaximum() + padding,
+            comune_extent.yMaximum() + padding,
+        )
+
+        crs_authid = dst_crs.authid() if dst_crs.authid() else "EPSG:32632"
+        extent_string = "{},{},{},{} [{}]".format(
+            padded.xMinimum(),
+            padded.xMaximum(),
+            padded.yMinimum(),
+            padded.yMaximum(),
+            crs_authid,
+        )
+
+        if feedback is not None:
+            feedback.pushInfo(
+                "[OPTIMIZATION] Pre-filtro DUSAF al bbox del Comune "
+                f"({crs_authid}) prima di fix/reproject..."
+            )
+
+        # Tolerate invalid geometries during the extract step: the desktop
+        # DUSAF7 dataset typically has a few thousand invalid features that
+        # cause native:extractbyextent to abort. Skipping invalid features
+        # is safe here because FASE 1 (fix_geometries) of the workflow
+        # repairs them later anyway. We restore the original setting in a
+        # finally block to avoid leaking it onto subsequent algorithms.
+        original_invalid_check = context.invalidGeometryCheck()
+        try:
+            context.setInvalidGeometryCheck(QgsFeatureRequest.GeometrySkipInvalid)
+            filtered_layer = pipeline.run_algorithm(
+                "native:extractbyextent",
+                {
+                    "INPUT": dusaf_layer,
+                    "EXTENT": extent_string,
+                    "CLIP": False,
+                    "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
+                },
+                context,
+                feedback,
+                "DUSAF7_prefilter_bbox",
+            )
+        finally:
+            context.setInvalidGeometryCheck(original_invalid_check)
+
+        new_count = filtered_layer.featureCount()
+        if feedback is not None:
+            feedback.pushInfo(
+                f"[OPTIMIZATION] DUSAF pre-filtrato: {new_count} feature "
+                f"(era {original_count}) -> risparmio "
+                f"{(1 - new_count / max(original_count, 1)) * 100:.1f}%."
+            )
+
+        if new_count == 0:
+            if feedback is not None:
+                self._warn(
+                    feedback,
+                    "[WARN] Pre-filtro ha restituito 0 feature DUSAF. "
+                    "Verifica sovrapposizione geografica tra DUSAF e Comune; "
+                    "procedo con il layer originale.",
+                )
+            return None
+
+        return filtered_layer
 
     def _validate_comune_name_on_layer(self, comuni_layer, comune_name, feedback):
         municipality_field = self._resolve_first_available_field(
@@ -846,72 +1109,6 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         return canonical_name, municipality_field, region_code_field, region_name_field
 
     # -------------------------------------------------------------------------
-    # STILI
-    # -------------------------------------------------------------------------
-
-    def _style_path(self, project_dir, style_filename):
-        """
-        Cerca gli stili QML in modo portabile:
-        1. cartella stili del progetto QGIS attivo;
-        2. cartella stili inclusa nel plugin.
-        """
-        project_style_path = os.path.join(project_dir, STYLE_FOLDER_NAME, style_filename)
-        if os.path.exists(project_style_path):
-            return project_style_path
-
-        plugin_style_path = os.path.join(PLUGIN_DIR, STYLE_FOLDER_NAME, style_filename)
-        if os.path.exists(plugin_style_path):
-            return plugin_style_path
-
-        return project_style_path
-
-    def _apply_style(self, layer, project_dir, style_filename, feedback):
-        if layer is None or not layer.isValid():
-            self._warn(feedback, f"[STYLE WARNING] Layer non valido. Stile non applicato: {style_filename}")
-            return
-
-        style_path = self._style_path(project_dir, style_filename)
-
-        if not os.path.exists(style_path):
-            self._warn(
-                feedback,
-                f"[STYLE WARNING] File stile non trovato: {style_path}. "
-                "Il layer resta con simbologia di default."
-            )
-            return
-
-        try:
-            result = layer.loadNamedStyle(style_path)
-
-            success = True
-            message = ""
-
-            if isinstance(result, tuple):
-                if len(result) >= 2:
-                    message = str(result[0])
-                    success = bool(result[1])
-                elif len(result) == 1:
-                    message = str(result[0])
-
-            layer.triggerRepaint()
-
-            if success:
-                self._msg(feedback, f"[STYLE OK] Applicato stile '{style_filename}' al layer '{layer.name()}'.")
-            else:
-                self._warn(
-                    feedback,
-                    f"[STYLE WARNING] Stile '{style_filename}' non applicato correttamente al layer "
-                    f"'{layer.name()}'. Messaggio: {message}"
-                )
-
-        except Exception as e:
-            self._warn(
-                feedback,
-                f"[STYLE WARNING] Errore durante applicazione stile '{style_filename}' "
-                f"al layer '{layer.name()}': {e}"
-            )
-
-    # -------------------------------------------------------------------------
     # CAMPI
     # -------------------------------------------------------------------------
 
@@ -949,341 +1146,6 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         return _first_available_field(layer, candidates)
 
     # -------------------------------------------------------------------------
-    # PROCESSING HELPERS
-    # -------------------------------------------------------------------------
-
-    def _layer_from_output(self, output_object, context, layer_name):
-        if isinstance(output_object, QgsVectorLayer):
-            output_object.setName(layer_name)
-            return output_object
-
-        layer = QgsProcessingUtils.mapLayerFromString(str(output_object), context)
-
-        if layer is not None and layer.isValid():
-            layer.setName(layer_name)
-            return layer
-
-        layer = QgsVectorLayer(str(output_object), layer_name, "ogr")
-
-        if layer.isValid():
-            return layer
-
-        raise QgsProcessingException(f"Output Processing non valido: {layer_name}")
-
-    def _run(self, alg_id, params, context, feedback, out_name):
-        if feedback.isCanceled():
-            raise QgsProcessingException("Operazione annullata dall'utente.")
-
-        self._msg(feedback, f"[RUN] {alg_id} -> {out_name}")
-
-        result = processing.run(
-            alg_id,
-            params,
-            context=context,
-            feedback=feedback,
-            is_child_algorithm=True,
-        )
-
-        if "OUTPUT" not in result:
-            raise QgsProcessingException(f"L'algoritmo {alg_id} non ha restituito OUTPUT.")
-
-        return self._layer_from_output(result["OUTPUT"], context, out_name)
-
-    def _fix_geometries(self, input_layer, context, feedback, out_name):
-        params = {
-            "INPUT": input_layer,
-            "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-        }
-
-        try:
-            params_with_method = dict(params)
-            params_with_method["METHOD"] = 1
-            return self._run("native:fixgeometries", params_with_method, context, feedback, out_name)
-        except Exception:
-            return self._run("native:fixgeometries", params, context, feedback, out_name)
-
-    def _reproject(self, input_layer, context, feedback, out_name):
-        return self._run(
-            "native:reprojectlayer",
-            {
-                "INPUT": input_layer,
-                "TARGET_CRS": TARGET_CRS,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    def _extract_by_expression(self, input_layer, expression, context, feedback, out_name):
-        self._msg(feedback, f"[EXPRESSION] {expression}")
-
-        return self._run(
-            "native:extractbyexpression",
-            {
-                "INPUT": input_layer,
-                "EXPRESSION": expression,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    def _clip(self, input_layer, overlay_layer, context, feedback, out_name):
-        return self._run(
-            "native:clip",
-            {
-                "INPUT": input_layer,
-                "OVERLAY": overlay_layer,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    def _dissolve_all(self, input_layer, context, feedback, out_name):
-        return self._run(
-            "native:dissolve",
-            {
-                "INPUT": input_layer,
-                "FIELD": [],
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    def _dissolve_by_fields(self, input_layer, fields, context, feedback, out_name):
-        return self._run(
-            "native:dissolve",
-            {
-                "INPUT": input_layer,
-                "FIELD": fields,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    def _multipart_to_singleparts(self, input_layer, context, feedback, out_name):
-        return self._run(
-            "native:multiparttosingleparts",
-            {
-                "INPUT": input_layer,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            out_name,
-        )
-
-    # -------------------------------------------------------------------------
-    # QC E CALCOLI
-    # -------------------------------------------------------------------------
-
-    def _count_invalid_geometries(self, layer):
-        total = 0
-        invalid = 0
-        empty = 0
-
-        for feat in layer.getFeatures():
-            total += 1
-            geom = feat.geometry()
-
-            if geom is None or geom.isEmpty():
-                empty += 1
-            elif not geom.isGeosValid():
-                invalid += 1
-
-        return total, invalid, empty
-
-    def _total_area_m2(self, layer):
-        total = 0.0
-
-        for feat in layer.getFeatures():
-            geom = feat.geometry()
-
-            if geom is not None and not geom.isEmpty():
-                total += geom.area()
-
-        return total
-
-    def _add_or_reset_fields(self, layer, field_defs):
-        provider = layer.dataProvider()
-        existing_names = [field.name() for field in layer.fields()]
-
-        to_delete = []
-
-        for field in field_defs:
-            if field.name() in existing_names:
-                idx = layer.fields().indexFromName(field.name())
-                if idx >= 0:
-                    to_delete.append(idx)
-
-        if to_delete:
-            provider.deleteAttributes(to_delete)
-            layer.updateFields()
-
-        provider.addAttributes(field_defs)
-        layer.updateFields()
-
-    def _add_area_fields(
-        self,
-        layer,
-        sliver_min_area_m2=None,
-        total_dusaf_m2=None,
-        boundary_area_m2=None,
-        include_sliver=False,
-        include_percentages=False,
-    ):
-        fields = [
-            QgsField("area_m2", QVariant.Double, "double", 20, 3),
-            QgsField("area_ha", QVariant.Double, "double", 20, 6),
-        ]
-
-        if include_percentages:
-            fields.append(QgsField("pct_dusaf", QVariant.Double, "double", 20, 6))
-            fields.append(QgsField("pct_comune", QVariant.Double, "double", 20, 6))
-
-        if include_sliver:
-            fields.append(QgsField("sliver", QVariant.Int, "integer", 1, 0))
-
-        self._add_or_reset_fields(layer, fields)
-
-        idx_area_m2 = layer.fields().indexFromName("area_m2")
-        idx_area_ha = layer.fields().indexFromName("area_ha")
-        idx_pct_dusaf = layer.fields().indexFromName("pct_dusaf") if include_percentages else None
-        idx_pct_comune = layer.fields().indexFromName("pct_comune") if include_percentages else None
-        idx_sliver = layer.fields().indexFromName("sliver") if include_sliver else None
-
-        with edit(layer):
-            for feat in layer.getFeatures():
-                geom = feat.geometry()
-                area_m2 = 0.0 if geom is None or geom.isEmpty() else geom.area()
-                area_ha = area_m2 / 10000.0
-
-                layer.changeAttributeValue(feat.id(), idx_area_m2, area_m2)
-                layer.changeAttributeValue(feat.id(), idx_area_ha, area_ha)
-
-                if include_percentages:
-                    pct_dusaf = 0.0 if not total_dusaf_m2 else (area_m2 / total_dusaf_m2) * 100.0
-                    pct_comune = 0.0 if not boundary_area_m2 else (area_m2 / boundary_area_m2) * 100.0
-
-                    layer.changeAttributeValue(feat.id(), idx_pct_dusaf, pct_dusaf)
-                    layer.changeAttributeValue(feat.id(), idx_pct_comune, pct_comune)
-
-                if include_sliver:
-                    threshold = 0.0 if sliver_min_area_m2 is None else float(sliver_min_area_m2)
-                    sliver = 1 if 0.0 < area_m2 <= threshold else 0
-                    layer.changeAttributeValue(feat.id(), idx_sliver, sliver)
-
-        return layer
-
-    # -------------------------------------------------------------------------
-    # OUTPUT
-    # -------------------------------------------------------------------------
-
-    def _save_layer_to_gpkg(self, layer, gpkg_path, layer_name, overwrite_file, context, feedback):
-        options = QgsVectorFileWriter.SaveVectorOptions()
-        options.driverName = "GPKG"
-        options.layerName = layer_name
-
-        if overwrite_file:
-            options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
-        else:
-            options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
-
-        result = QgsVectorFileWriter.writeAsVectorFormatV3(
-            layer,
-            gpkg_path,
-            context.transformContext(),
-            options,
-        )
-
-        err_code = result[0]
-        err_msg = result[1] if len(result) > 1 else ""
-
-        if err_code != QgsVectorFileWriter.NoError:
-            raise QgsProcessingException(f"Errore salvataggio layer '{layer_name}': {err_msg}")
-
-        self._msg(feedback, f"[OK] Salvato layer GeoPackage: {layer_name}")
-
-    def _add_saved_layer_to_project(
-        self,
-        gpkg_path,
-        layer_name,
-        display_name,
-        feedback,
-        project_dir=None,
-        style_filename=None,
-    ):
-        uri = f"{gpkg_path}|layername={layer_name}"
-        layer = QgsVectorLayer(uri, display_name, "ogr")
-
-        if layer.isValid():
-            if project_dir and style_filename:
-                self._apply_style(layer, project_dir, style_filename, feedback)
-
-            QgsProject.instance().addMapLayer(layer)
-            self._msg(feedback, f"[OK] Aggiunto al progetto QGIS: {display_name}")
-        else:
-            self._warn(feedback, f"[WARN] Layer salvato ma non ricaricato nel progetto: {display_name}")
-
-    def _export_summary_csv(self, layer, class_field, desc_field, csv_path, feedback):
-        rows = []
-
-        for feat in layer.getFeatures():
-            codice = feat[class_field]
-            descrizione = feat[desc_field]
-
-            rows.append(
-                {
-                    "codice_dusaf": "" if codice is None else str(codice),
-                    "descrizione": "" if descrizione is None else str(descrizione),
-                    "area_m2": float(feat["area_m2"]),
-                    "area_ha": float(feat["area_ha"]),
-                    "pct_dusaf": float(feat["pct_dusaf"]),
-                    "pct_comune": float(feat["pct_comune"]),
-                }
-            )
-
-        rows.sort(key=lambda row: row["area_ha"], reverse=True)
-
-        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "codice_dusaf",
-                    "descrizione",
-                    "area_m2",
-                    "area_ha",
-                    "pct_dusaf",
-                    "pct_comune",
-                ],
-                delimiter=";",
-            )
-
-            writer.writeheader()
-
-            for row in rows:
-                writer.writerow(
-                    {
-                        "codice_dusaf": row["codice_dusaf"],
-                        "descrizione": row["descrizione"],
-                        "area_m2": round(row["area_m2"], 3),
-                        "area_ha": round(row["area_ha"], 6),
-                        "pct_dusaf": round(row["pct_dusaf"], 6),
-                        "pct_comune": round(row["pct_comune"], 6),
-                    }
-                )
-
-        self._msg(feedback, f"[OK] CSV esportato: {csv_path}")
-
-    # -------------------------------------------------------------------------
     # MAIN
     # -------------------------------------------------------------------------
 
@@ -1300,10 +1162,20 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         except Exception:
             pass
 
-        self._warn(feedback, f"[ALERT] {PRE_RUN_ALERT}")
-
         comune_name_input = self.parameterAsString(parameters, self.COMUNE_NAME, context).strip()
         sliver_min_area_m2 = self.parameterAsDouble(parameters, self.SLIVER_MIN_AREA_M2, context)
+
+        save_to_disk = True
+        try:
+            save_to_disk = bool(
+                self.parameterAsBool(parameters, self.SAVE_TO_DISK, context)
+            )
+        except Exception:
+            save_to_disk = True
+
+        output_dir_override = self.parameterAsString(
+            parameters, self.OUTPUT_DIR_OVERRIDE, context
+        ).strip()
 
         if not comune_name_input:
             raise QgsProcessingException(
@@ -1314,27 +1186,18 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         if sliver_min_area_m2 < 0:
             raise QgsProcessingException("L'area minima degli slivers non può essere negativa.")
 
-        project_dir = self._project_dir()
-
-        dusaf = self._get_required_dusaf_layer()
-        comuni = self._get_required_comuni_layer()
-
-        if dusaf.source() == comuni.source():
-            raise QgsProcessingException(
-                "ERRORE DI CONFIGURAZIONE: il layer DUSAF7 e il layer dei confini comunali risultano identici. "
-                "Caricare nel progetto QGIS due layer distinti: DUSAF7 e Com01012026_WGS84."
-            )
-
-        class_field = self._resolve_exact_or_case_field(
-            dusaf,
-            DUSAF_CLASS_FIELD,
-            "codice DUSAF",
+        project_dir = self._resolve_project_dir(
+            override=output_dir_override,
+            require=save_to_disk,
         )
 
-        desc_field = self._resolve_exact_or_case_field(
-            dusaf,
-            DUSAF_DESC_FIELD,
-            "descrizione DUSAF",
+        # === RISOLUZIONE FONTE COMUNI ==========================================
+        # Priorità: layer caricato nel progetto (back-compat); altrimenti fetch
+        # REST del singolo Comune dal servizio Regione Lombardia
+        # Ambiti_Amministrativi (memory layer in EPSG:32632 con 1 feature).
+        comuni = self._get_required_comuni_layer(
+            comune_name=comune_name_input,
+            feedback=feedback,
         )
 
         comune_name, municipality_field, region_code_field, region_name_field = self._validate_comune_name_on_layer(
@@ -1360,19 +1223,17 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "======================================================")
         self._msg(feedback, "AVVIO - Analisi DUSAF 7 per Comune Lombardo")
         self._msg(feedback, "======================================================")
-        self._msg(feedback, f"[ALERT] {PRE_RUN_ALERT}")
         self._msg(feedback, f"[OK] Comune richiesto: {comune_name}")
-        self._msg(feedback, f"[OK] Layer DUSAF riconosciuto automaticamente: {dusaf.name()}")
-        self._msg(feedback, f"[OK] Layer Comuni riconosciuto automaticamente: {comuni.name()}")
+        self._msg(feedback, f"[OK] Layer Comuni: {comuni.name()}")
         self._msg(feedback, f"[OK] Cartella progetto QGIS: {project_dir}")
         self._msg(feedback, f"[OK] Cartella output: {output_dir}")
         self._msg(feedback, f"[OK] Cartella stili progetto: {style_dir}")
         self._msg(feedback, f"[OK] Cartella stili plugin: {plugin_style_dir}")
-        self._msg(feedback, f"[OK] CRS operativo: {TARGET_CRS.authid()}")
+        self._msg(feedback, f"[OK] CRS operativo: {target_crs().authid()}")
         self._msg(feedback, f"[OK] Campo codice DUSAF fisso: {DUSAF_CLASS_FIELD}")
         self._msg(feedback, f"[OK] Campo descrizione DUSAF fisso: {DUSAF_DESC_FIELD}")
         self._msg(feedback, f"[OK] Soglia slivers: <= {sliver_min_area_m2} m²")
-        self._msg(feedback, f"[OK] Campo nome Comune ISTAT: {municipality_field}")
+        self._msg(feedback, f"[OK] Campo nome Comune: {municipality_field}")
 
         if not os.path.isdir(style_dir) and not os.path.isdir(plugin_style_dir):
             self._warn(
@@ -1382,51 +1243,30 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 "Gli output saranno caricati senza simbologia QML personalizzata."
             )
 
-        for layer in [dusaf, comuni]:
-            total, invalid, empty = self._count_invalid_geometries(layer)
-            self._msg(
-                feedback,
-                f"[QC INPUT] {layer.name()} | feature: {total} | invalid: {invalid} | empty: {empty}",
-            )
+        total, invalid, empty = qc.count_invalid_geometries(comuni)
+        self._msg(
+            feedback,
+            f"[QC INPUT] {comuni.name()} | feature: {total} | invalid: {invalid} | empty: {empty}",
+        )
 
         feedback.setProgress(5)
 
-        null_codes = 0
-
-        for feat in dusaf.getFeatures():
-            value = feat[class_field]
-            if value is None or str(value).strip() == "":
-                null_codes += 1
-
-        if null_codes > 0:
-            raise QgsProcessingException(
-                f"QC-4 FAIL: presenti {null_codes} feature DUSAF con codice '{class_field}' nullo o vuoto."
-            )
-
-        self._msg(feedback, "[QC-4 OK] Nessun codice DUSAF nullo o vuoto rilevato.")
-
-        feedback.setProgress(10)
-
         self._msg(feedback, "------------------------------------------------------")
-        self._msg(feedback, "FASE 1 - Fix geometries input")
+        self._msg(feedback, "FASE 1 - Fix geometries Comuni")
         self._msg(feedback, "------------------------------------------------------")
 
-        dusaf_fix_pre = self._fix_geometries(dusaf, context, feedback, "DUSAF7_fix_pre")
-        comuni_fix_pre = self._fix_geometries(comuni, context, feedback, "Comuni_ISTAT_fix_pre")
+        comuni_fix_pre = pipeline.fix_geometries(comuni, context, feedback, "Comuni_fix_pre")
+
+        feedback.setProgress(12)
+
+        self._msg(feedback, "------------------------------------------------------")
+        self._msg(feedback, "FASE 2 - Riproiezione Comuni in EPSG:32632")
+        self._msg(feedback, "------------------------------------------------------")
+
+        comuni_32632 = pipeline.reproject(comuni_fix_pre, target_crs(), context, feedback, "Comuni_EPSG32632")
+        comuni_32632_fix = pipeline.fix_geometries(comuni_32632, context, feedback, "Comuni_EPSG32632_fix")
 
         feedback.setProgress(20)
-
-        self._msg(feedback, "------------------------------------------------------")
-        self._msg(feedback, "FASE 2 - Riproiezione in EPSG:32632")
-        self._msg(feedback, "------------------------------------------------------")
-
-        dusaf_32632 = self._reproject(dusaf_fix_pre, context, feedback, "DUSAF7_EPSG32632")
-        comuni_32632 = self._reproject(comuni_fix_pre, context, feedback, "Comuni_ISTAT_EPSG32632")
-
-        dusaf_32632_fix = self._fix_geometries(dusaf_32632, context, feedback, "DUSAF7_EPSG32632_fix")
-        comuni_32632_fix = self._fix_geometries(comuni_32632, context, feedback, "Comuni_ISTAT_EPSG32632_fix")
-
-        feedback.setProgress(35)
 
         self._msg(feedback, "------------------------------------------------------")
         self._msg(feedback, "FASE 3 - Estrazione Comune")
@@ -1452,7 +1292,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 "Il filtro userà solo il nome del Comune; verificare eventuali omonimie fuori Lombardia.",
             )
 
-        comune_extract = self._extract_by_expression(
+        comune_extract = pipeline.extract_by_expression(
             comuni_32632_fix,
             comune_expr,
             context,
@@ -1472,21 +1312,21 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 "Verranno dissolte in un unico perimetro. Verificare eventuali omonimie.",
             )
 
-        comune_diss = self._dissolve_all(
+        comune_diss = pipeline.dissolve_all(
             comune_extract,
             context,
             feedback,
             f"Confine_{safe_comune}_dissolve",
         )
 
-        comune_fix = self._fix_geometries(
+        comune_fix = pipeline.fix_geometries(
             comune_diss,
             context,
             feedback,
             f"Confine_{safe_comune}_fix",
         )
 
-        boundary_area_m2 = self._total_area_m2(comune_fix)
+        boundary_area_m2 = qc.total_area_m2(comune_fix)
         boundary_area_ha = boundary_area_m2 / 10000.0
 
         self._msg(feedback, f"[QC] Superficie perimetro comunale originale: {boundary_area_ha:.6f} ha")
@@ -1494,13 +1334,71 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         if boundary_area_m2 <= 0:
             raise QgsProcessingException("QC FAIL: superficie del perimetro comunale nulla o non valida.")
 
-        feedback.setProgress(45)
+        feedback.setProgress(40)
+
+        # === RISOLUZIONE FONTE DUSAF ===========================================
+        # Priorità: layer caricato nel progetto (back-compat); altrimenti fetch
+        # REST dal servizio Regione Lombardia dusaf7 limitato all'envelope del
+        # confine comunale appena calcolato (riduce traffico e tempo).
+        self._msg(feedback, "------------------------------------------------------")
+        self._msg(feedback, "FASE 4 - Preparazione DUSAF (risoluzione, fix, reproject)")
+        self._msg(feedback, "------------------------------------------------------")
+
+        dusaf = self._get_required_dusaf_layer(
+            comune_geometry_layer=comune_fix,
+            feedback=feedback,
+            context=context,
+        )
+
+        if dusaf.source() == comuni.source():
+            raise QgsProcessingException(
+                "ERRORE DI CONFIGURAZIONE: il layer DUSAF e il layer Comuni risultano "
+                "identici. Caricare due layer distinti o lasciare che il plugin li "
+                "scarichi da REST."
+            )
+
+        class_field = self._resolve_exact_or_case_field(
+            dusaf,
+            DUSAF_CLASS_FIELD,
+            "codice DUSAF",
+        )
+
+        desc_field = self._resolve_exact_or_case_field(
+            dusaf,
+            DUSAF_DESC_FIELD,
+            "descrizione DUSAF",
+        )
+
+        total, invalid, empty = qc.count_invalid_geometries(dusaf)
+        self._msg(
+            feedback,
+            f"[QC INPUT] {dusaf.name()} | feature: {total} | invalid: {invalid} | empty: {empty}",
+        )
+
+        null_codes = 0
+        for feat in dusaf.getFeatures():
+            value = feat[class_field]
+            if value is None or str(value).strip() == "":
+                null_codes += 1
+
+        if null_codes > 0:
+            raise QgsProcessingException(
+                f"QC-4 FAIL: presenti {null_codes} feature DUSAF con codice '{class_field}' nullo o vuoto."
+            )
+
+        self._msg(feedback, "[QC-4 OK] Nessun codice DUSAF nullo o vuoto rilevato.")
+
+        dusaf_fix_pre = pipeline.fix_geometries(dusaf, context, feedback, "DUSAF7_fix_pre")
+        dusaf_32632 = pipeline.reproject(dusaf_fix_pre, target_crs(), context, feedback, "DUSAF7_EPSG32632")
+        dusaf_32632_fix = pipeline.fix_geometries(dusaf_32632, context, feedback, "DUSAF7_EPSG32632_fix")
+
+        feedback.setProgress(50)
 
         self._msg(feedback, "------------------------------------------------------")
-        self._msg(feedback, "FASE 4 - Clip DUSAF sul Comune")
+        self._msg(feedback, "FASE 4b - Clip DUSAF sul Comune")
         self._msg(feedback, "------------------------------------------------------")
 
-        dusaf_clip = self._clip(
+        dusaf_clip = pipeline.clip(
             dusaf_32632_fix,
             comune_fix,
             context,
@@ -1514,21 +1412,21 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 "Verificare CRS, sovrapposizione geografica e layer di input."
             )
 
-        dusaf_clip_fix = self._fix_geometries(
+        dusaf_clip_fix = pipeline.fix_geometries(
             dusaf_clip,
             context,
             feedback,
             f"DUSAF7_clip_{safe_comune}_fix",
         )
 
-        dusaf_clip_single = self._multipart_to_singleparts(
+        dusaf_clip_single = pipeline.multipart_to_singleparts(
             dusaf_clip_fix,
             context,
             feedback,
             f"DUSAF7_clip_{safe_comune}_singlepart",
         )
 
-        dusaf_clip_single_fix = self._fix_geometries(
+        dusaf_clip_single_fix = pipeline.fix_geometries(
             dusaf_clip_single,
             context,
             feedback,
@@ -1541,7 +1439,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 5 - Calcolo aree preliminari e slivers")
         self._msg(feedback, "------------------------------------------------------")
 
-        dusaf_clip_qc = self._add_area_fields(
+        dusaf_clip_qc = qc.add_area_fields(
             dusaf_clip_single_fix,
             sliver_min_area_m2=sliver_min_area_m2,
             include_sliver=True,
@@ -1562,7 +1460,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             f"feature sliver: {sliver_count} | area sliver: {sliver_area_m2:.6f} m²",
         )
 
-        slivers_layer = self._extract_by_expression(
+        slivers_layer = pipeline.extract_by_expression(
             dusaf_clip_qc,
             '"sliver" = 1',
             context,
@@ -1576,7 +1474,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 6 - Dissolve per classe DUSAF")
         self._msg(feedback, "------------------------------------------------------")
 
-        dusaf_diss = self._dissolve_by_fields(
+        dusaf_diss = pipeline.dissolve_by_fields(
             dusaf_clip_qc,
             [class_field, desc_field],
             context,
@@ -1584,17 +1482,17 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             f"DUSAF7_{safe_comune}_dissolve_by_class",
         )
 
-        dusaf_diss_fix = self._fix_geometries(
+        dusaf_diss_fix = pipeline.fix_geometries(
             dusaf_diss,
             context,
             feedback,
             f"DUSAF7_{safe_comune}_dissolve_by_class_fix",
         )
 
-        total_dusaf_m2 = self._total_area_m2(dusaf_diss_fix)
+        total_dusaf_m2 = qc.total_area_m2(dusaf_diss_fix)
         total_dusaf_ha = total_dusaf_m2 / 10000.0
 
-        dusaf_final = self._add_area_fields(
+        dusaf_final = qc.add_area_fields(
             dusaf_diss_fix,
             total_dusaf_m2=total_dusaf_m2,
             boundary_area_m2=boundary_area_m2,
@@ -1655,107 +1553,178 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
 
         feedback.setProgress(90)
 
-        self._msg(feedback, "------------------------------------------------------")
-        self._msg(feedback, "FASE 8 - Salvataggio output")
-        self._msg(feedback, "------------------------------------------------------")
+        if save_to_disk:
+            self._msg(feedback, "------------------------------------------------------")
+            self._msg(feedback, "FASE 8 - Salvataggio output (GeoPackage + CSV)")
+            self._msg(feedback, "------------------------------------------------------")
 
-        self._save_layer_to_gpkg(
-            dusaf_final,
-            gpkg_path,
-            f"dusaf7_{safe_comune}_superfici",
-            overwrite_file=True,
-            context=context,
-            feedback=feedback,
-        )
-
-        self._save_layer_to_gpkg(
-            dusaf_clip_qc,
-            gpkg_path,
-            f"dusaf7_{safe_comune}_clip_qc",
-            overwrite_file=False,
-            context=context,
-            feedback=feedback,
-        )
-
-        self._save_layer_to_gpkg(
-            comune_fix,
-            gpkg_path,
-            f"confine_{safe_comune}_fix",
-            overwrite_file=False,
-            context=context,
-            feedback=feedback,
-        )
-
-        if slivers_layer.featureCount() > 0:
-            self._save_layer_to_gpkg(
-                slivers_layer,
+            output.save_layer_to_gpkg(
+                dusaf_final,
                 gpkg_path,
-                f"qc_slivers_{safe_comune}",
+                f"dusaf7_{safe_comune}_superfici",
+                overwrite_file=True,
+                context=context,
+                feedback=feedback,
+            )
+
+            output.save_layer_to_gpkg(
+                dusaf_clip_qc,
+                gpkg_path,
+                f"dusaf7_{safe_comune}_clip_qc",
                 overwrite_file=False,
                 context=context,
                 feedback=feedback,
             )
 
-        self._export_summary_csv(
-            dusaf_final,
-            class_field,
-            desc_field,
-            csv_path,
-            feedback,
-        )
-
-        feedback.setProgress(96)
-
-        self._msg(feedback, "------------------------------------------------------")
-        self._msg(feedback, "FASE 9 - Caricamento output nel progetto e stili QML")
-        self._msg(feedback, "------------------------------------------------------")
-
-        self._add_saved_layer_to_project(
-            gpkg_path,
-            f"dusaf7_{safe_comune}_superfici",
-            f"DUSAF7 {comune_name} - superfici ha %",
-            feedback,
-            project_dir=project_dir,
-            style_filename=STYLE_DUSAF_FINAL,
-        )
-
-        self._add_saved_layer_to_project(
-            gpkg_path,
-            f"dusaf7_{safe_comune}_clip_qc",
-            f"DUSAF7 {comune_name} - clip QC",
-            feedback,
-            project_dir=project_dir,
-            style_filename=STYLE_DUSAF_CLIP_QC,
-        )
-
-        self._add_saved_layer_to_project(
-            gpkg_path,
-            f"confine_{safe_comune}_fix",
-            f"Confine {comune_name} fix",
-            feedback,
-            project_dir=project_dir,
-            style_filename=STYLE_CONFINE,
-        )
-
-        if slivers_layer.featureCount() > 0:
-            self._add_saved_layer_to_project(
+            output.save_layer_to_gpkg(
+                comune_fix,
                 gpkg_path,
-                f"qc_slivers_{safe_comune}",
-                f"QC slivers DUSAF7 {comune_name}",
-                feedback,
-                project_dir=project_dir,
-                style_filename=STYLE_SLIVERS,
+                f"confine_{safe_comune}_fix",
+                overwrite_file=False,
+                context=context,
+                feedback=feedback,
             )
+
+            if slivers_layer.featureCount() > 0:
+                output.save_layer_to_gpkg(
+                    slivers_layer,
+                    gpkg_path,
+                    f"qc_slivers_{safe_comune}",
+                    overwrite_file=False,
+                    context=context,
+                    feedback=feedback,
+                )
+
+            output.export_summary_csv(
+                dusaf_final,
+                class_field,
+                desc_field,
+                csv_path,
+                feedback,
+            )
+
+            feedback.setProgress(96)
+
+            self._msg(feedback, "------------------------------------------------------")
+            self._msg(feedback, "FASE 9 - Caricamento output nel progetto e stili QML")
+            self._msg(feedback, "------------------------------------------------------")
+
+            output.add_saved_layer_to_project(
+                gpkg_path,
+                f"dusaf7_{safe_comune}_superfici",
+                f"DUSAF7 {comune_name} - superfici ha %",
+                feedback,
+                plugin_dir=PLUGIN_DIR,
+                project_dir=project_dir,
+                style_filename=STYLE_DUSAF_FINAL,
+            )
+
+            output.add_saved_layer_to_project(
+                gpkg_path,
+                f"dusaf7_{safe_comune}_clip_qc",
+                f"DUSAF7 {comune_name} - clip QC",
+                feedback,
+                plugin_dir=PLUGIN_DIR,
+                project_dir=project_dir,
+                style_filename=STYLE_DUSAF_CLIP_QC,
+            )
+
+            output.add_saved_layer_to_project(
+                gpkg_path,
+                f"confine_{safe_comune}_fix",
+                f"Confine {comune_name} fix",
+                feedback,
+                plugin_dir=PLUGIN_DIR,
+                project_dir=project_dir,
+                style_filename=STYLE_CONFINE,
+            )
+
+            if slivers_layer.featureCount() > 0:
+                output.add_saved_layer_to_project(
+                    gpkg_path,
+                    f"qc_slivers_{safe_comune}",
+                    f"QC slivers DUSAF7 {comune_name}",
+                    feedback,
+                    plugin_dir=PLUGIN_DIR,
+                    project_dir=project_dir,
+                    style_filename=STYLE_SLIVERS,
+                )
+        else:
+            self._msg(feedback, "------------------------------------------------------")
+            self._msg(feedback, "FASE 8 - SALTATA (salvataggio su disco disattivato)")
+            self._msg(feedback, "------------------------------------------------------")
+            gpkg_path = ""
+            csv_path = ""
+
+            self._msg(feedback, "------------------------------------------------------")
+            self._msg(feedback, "FASE 9 - Caricamento layer temporanei nel progetto")
+            self._msg(feedback, "------------------------------------------------------")
+
+            self._add_memory_layer_to_project(
+                dusaf_final,
+                f"DUSAF7 {comune_name} - superfici ha %",
+                STYLE_DUSAF_FINAL,
+                project_dir,
+                feedback,
+            )
+            self._add_memory_layer_to_project(
+                dusaf_clip_qc,
+                f"DUSAF7 {comune_name} - clip QC",
+                STYLE_DUSAF_CLIP_QC,
+                project_dir,
+                feedback,
+            )
+            self._add_memory_layer_to_project(
+                comune_fix,
+                f"Confine {comune_name} fix",
+                STYLE_CONFINE,
+                project_dir,
+                feedback,
+            )
+            if slivers_layer.featureCount() > 0:
+                self._add_memory_layer_to_project(
+                    slivers_layer,
+                    f"QC slivers DUSAF7 {comune_name}",
+                    STYLE_SLIVERS,
+                    project_dir,
+                    feedback,
+                )
+
+            feedback.setProgress(96)
 
         feedback.setProgress(100)
 
         self._msg(feedback, "======================================================")
         self._msg(feedback, "WORKFLOW COMPLETATO")
         self._msg(feedback, "======================================================")
-        self._msg(feedback, f"GeoPackage: {gpkg_path}")
-        self._msg(feedback, f"CSV:        {csv_path}")
+        if save_to_disk:
+            self._msg(feedback, f"GeoPackage: {gpkg_path}")
+            self._msg(feedback, f"CSV:        {csv_path}")
+        else:
+            self._msg(feedback, "Modalità memoria: nessun file su disco.")
 
         return {
             self.OUTPUT_GPKG: gpkg_path,
             self.OUTPUT_CSV: csv_path,
         }
+
+    def _add_memory_layer_to_project(self, layer, display_name, style_filename, project_dir, feedback):
+        """Add an in-memory layer to the current project with the given style.
+
+        Used when ``SAVE_TO_DISK`` is False so the user gets the same four
+        styled outputs as the file mode, but only as Processing temporary
+        layers (they vanish when QGIS is closed unless the user makes them
+        permanent via right-click).
+        """
+        if layer is None or not layer.isValid():
+            self._warn(feedback, f"[WARN] Layer non valido, salto: {display_name}")
+            return
+
+        try:
+            layer.setName(display_name)
+        except Exception:
+            pass
+
+        output.apply_style(layer, PLUGIN_DIR, project_dir, style_filename, feedback)
+        QgsProject.instance().addMapLayer(layer)
+        self._msg(feedback, f"[OK] Aggiunto al progetto QGIS (memoria): {display_name}")
