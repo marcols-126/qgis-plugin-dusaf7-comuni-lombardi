@@ -10,11 +10,15 @@ detection behind two helper functions that return ready-to-use
 logging.
 """
 
+from qgis.core import QgsFeatureRequest, QgsVectorLayer
+
 from ..data_sources import (
     CacheManager,
+    IstatBoundariesClient,
     LombardiaComuniClient,
     LombardiaDusafClient,
     geojson_features_to_memory_layer,
+    normalize_comune_display_name,
 )
 from ..data_sources.comuni_list_cache import ComuniListCache
 
@@ -52,15 +56,122 @@ def _parse_dusaf_descr(descr_raw):
     return "", text
 
 
+def get_istat_cached_shapefile_path(cache_manager=None):
+    """Return the path to the cached ISTAT ``.shp`` or ``None`` when missing."""
+    cm = cache_manager or CacheManager()
+    return IstatBoundariesClient().cached_shapefile_path(cm)
+
+
+def load_comuni_layer_from_istat_cache(cache_manager=None):
+    """Return a ``QgsVectorLayer`` pointing at the cached ISTAT shapefile.
+
+    Returns ``None`` when no ISTAT cache is configured or when the shapefile
+    cannot be opened. The layer is loaded with the ``ogr`` provider in the
+    shapefile's native CRS (EPSG:32632 for the official 2026 dataset).
+    """
+    shp_path = get_istat_cached_shapefile_path(cache_manager)
+    if not shp_path:
+        return None
+
+    layer = QgsVectorLayer(shp_path, "Comuni_ISTAT_cache", "ogr")
+    if not layer.isValid():
+        return None
+    return layer
+
+
+def _extract_lombard_comuni_from_istat_layer(layer):
+    """Return the autocomplete-shape list of Lombard Comuni from an ISTAT layer.
+
+    Mirrors the schema returned by ``LombardiaComuniClient.fetch_comuni_list``
+    so callers can treat both sources uniformly. Only Comuni with
+    ``COD_REG=3`` (Lombardia) are returned.
+    """
+    if layer is None or not layer.isValid():
+        return []
+
+    field_names = {f.name() for f in layer.fields()}
+
+    def _pick(*candidates):
+        for cand in candidates:
+            if cand in field_names:
+                return cand
+        return None
+
+    name_field = _pick("COMUNE", "DEN_COM", "DENOM_COM", "DENOMINAZIONE", "NOME_COM")
+    region_field = _pick("COD_REG")
+    province_name_field = _pick("DEN_PROV", "DEN_UTS", "NOME_PRO")
+    province_code_field = _pick("COD_PROV", "COD_UTS", "COD_PRO")
+    istat_field = _pick("PRO_COM", "PROCOM", "COD_ISTAT", "ISTAT")
+
+    if not name_field:
+        return []
+
+    attrs = [a for a in (name_field, region_field, province_name_field, province_code_field, istat_field) if a]
+    request = QgsFeatureRequest()
+    request.setFlags(QgsFeatureRequest.NoGeometry)
+    request.setSubsetOfAttributes(attrs, layer.fields())
+
+    comuni = []
+    for feat in layer.getFeatures(request):
+        if region_field:
+            region_value = feat[region_field]
+            try:
+                if int(str(region_value).strip()) != 3:
+                    continue
+            except (TypeError, ValueError):
+                continue
+
+        raw_name = feat[name_field]
+        if raw_name is None:
+            continue
+        display_name = normalize_comune_display_name(str(raw_name).strip())
+        if not display_name:
+            continue
+
+        entry = {"NOME_COM": display_name}
+        if province_name_field:
+            entry["NOME_PRO"] = feat[province_name_field]
+        if province_code_field:
+            try:
+                entry["COD_PRO"] = int(feat[province_code_field])
+            except (TypeError, ValueError):
+                entry["COD_PRO"] = feat[province_code_field]
+        if istat_field:
+            try:
+                entry["ISTAT"] = int(feat[istat_field])
+            except (TypeError, ValueError):
+                entry["ISTAT"] = feat[istat_field]
+
+        comuni.append(entry)
+
+    return comuni
+
+
 def get_comuni_list_for_autocomplete(cache_manager=None, force_refresh=False, feedback=None):
     """Return the lightweight ``(properties_dicts, source_label)`` Comuni list.
 
-    The label is one of ``"cache"`` (fresh entry in the plugin cache) or
-    ``"rest"`` (fresh REST fetch, also written to the cache).
+    Source resolution order:
+
+    1. ``"istat_cache"`` — cached ISTAT shapefile when configured by the
+       optional setup dialog.
+    2. ``"cache"`` — fresh entry in the lightweight JSON cache (TTL 30gg).
+    3. ``"rest"`` — fresh REST fetch from Regione Lombardia, also written
+       back to the JSON cache.
+
     Cache failures degrade gracefully: the REST result is returned even when
-    persistence fails so the autocomplete still works.
+    persistence fails so the autocomplete still works. The ISTAT path is
+    skipped when ``force_refresh=True``.
     """
-    cache = ComuniListCache(cache_manager or CacheManager())
+    cm = cache_manager or CacheManager()
+
+    if not force_refresh:
+        istat_layer = load_comuni_layer_from_istat_cache(cm)
+        if istat_layer is not None:
+            comuni = _extract_lombard_comuni_from_istat_layer(istat_layer)
+            if comuni:
+                return comuni, "istat_cache"
+
+    cache = ComuniListCache(cm)
 
     if not force_refresh:
         entry = cache.read()

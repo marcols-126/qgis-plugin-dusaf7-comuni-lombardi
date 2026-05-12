@@ -48,7 +48,10 @@ from qgis.core import (
 
 from ..compat import runtime_summary
 from ..data_sources import normalize_comune_display_name
-from ..workflow.data_resolver import get_comuni_list_for_autocomplete
+from ..workflow.data_resolver import (
+    get_comuni_list_for_autocomplete,
+    get_istat_cached_shapefile_path,
+)
 
 
 ALGORITHM_ID = "Analisi DUSAF 7:analisi_dusaf7_comune_lombardo"
@@ -252,12 +255,11 @@ class DusafMainDialog(QDialog):
 
         self._istat_btn = QPushButton("Usa ISTAT ufficiale (download)")
         self._istat_btn.setToolTip(
-            "Funzione opzionale: scaricare lo ZIP ufficiale ISTAT 2026 dei "
-            "confini comunali e usarlo come fonte autoritativa al posto del "
-            "REST RL. Implementazione completa in arrivo nella prossima "
-            "iterazione."
+            "Apre la configurazione opzionale ISTAT: scaricare lo ZIP "
+            "ufficiale 2026 dei confini comunali e usarlo come fonte "
+            "autoritativa al posto del servizio REST RL."
         )
-        self._istat_btn.setEnabled(False)
+        self._istat_btn.clicked.connect(self._on_istat_setup_clicked)
         comuni_actions.addWidget(self._istat_btn)
         comuni_actions.addStretch(1)
         status_layout.addLayout(comuni_actions)
@@ -378,6 +380,13 @@ class DusafMainDialog(QDialog):
                 self._comuni_status_label,
                 "<b>Confini comunali</b>: layer di progetto "
                 f"<i>{comuni_layer.name()}</i>",
+                STATUS_OK_STYLE,
+            )
+        elif get_istat_cached_shapefile_path() is not None:
+            self._set_label(
+                self._comuni_status_label,
+                "<b>Confini comunali</b>: cache ISTAT 2026 (fonte ufficiale). "
+                "Pre-configurata via setup ISTAT.",
                 STATUS_OK_STYLE,
             )
         else:
@@ -538,7 +547,12 @@ class DusafMainDialog(QDialog):
         self._comuni_metadata_by_key = metadata
         self._comune_completer_model.setStringList(names_sorted)
 
-        origin = "cache locale" if source == "cache" else "servizio REST Regione Lombardia"
+        if source == "istat_cache":
+            origin = "cache ISTAT ufficiale"
+        elif source == "cache":
+            origin = "cache locale (REST RL)"
+        else:
+            origin = "servizio REST Regione Lombardia"
         self._comuni_source_origin = origin
         self._comuni_source_count = len(names_sorted)
 
@@ -619,6 +633,21 @@ class DusafMainDialog(QDialog):
     def _on_refresh_comuni_clicked(self):
         self._log_widget.appendPlainText("[INFO] Forzato refresh della lista Comuni...")
         self._populate_comune_autocomplete(force_refresh=True)
+
+    def _on_istat_setup_clicked(self):
+        """Open the optional ISTAT setup dialog and refresh state on close."""
+        from .istat_setup_dialog import IstatSetupDialog
+        from ..compat import exec_dialog
+
+        dlg = IstatSetupDialog(self)
+        exec_dialog(dlg)
+
+        if dlg.cache_changed():
+            self._log_widget.appendPlainText(
+                "[INFO] Stato cache ISTAT cambiato. Aggiorno stato dati e lista Comuni..."
+            )
+            self._refresh_data_status()
+            self._populate_comune_autocomplete(force_refresh=True)
 
     def _on_run_clicked(self):
         key = _normalize_comune_key(self._comune_input.text())

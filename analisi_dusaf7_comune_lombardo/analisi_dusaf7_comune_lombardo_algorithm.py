@@ -41,6 +41,7 @@ from .workflow.data_resolver import (
     fetch_comune_geometry_layer,
     fetch_dusaf_layer_for_envelope,
     get_comuni_list_for_autocomplete,
+    load_comuni_layer_from_istat_cache,
 )
 from .workflow.output import (
     STYLE_CONFINE,
@@ -773,10 +774,15 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
     def _get_required_comuni_layer(self, comune_name=None, feedback=None):
         """Return a Comuni layer.
 
-        Priority: layer already loaded in the QGIS project (back-compat). When
-        not available, ``comune_name`` is required and the corresponding
-        single feature is fetched via REST from Regione Lombardia
-        Ambiti_Amministrativi.
+        Source resolution order:
+
+        1. Layer already loaded in the QGIS project (back-compat).
+        2. Cached ISTAT shapefile (when configured via the optional setup
+           dialog).
+        3. REST fetch of the single named Comune from Regione Lombardia
+           Ambiti_Amministrativi.
+
+        ``comune_name`` is only strictly required for the REST fallback.
         """
         layer = _find_comuni_project_layer()
 
@@ -785,10 +791,19 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 feedback.pushInfo(f"[DATA] Comuni da progetto: {layer.name()}")
             return layer
 
+        istat_layer = load_comuni_layer_from_istat_cache()
+        if istat_layer is not None:
+            if feedback is not None:
+                feedback.pushInfo(
+                    f"[DATA] Comuni da cache ISTAT: {istat_layer.source()}"
+                )
+            return istat_layer
+
         if not comune_name:
             raise QgsProcessingException(
-                f"MANCA_DATO: il layer '{COMUNI_REQUIRED_LAYER_NAME}' non è caricato nel progetto "
-                "e nessun nome Comune è disponibile per il fetch REST."
+                f"MANCA_DATO: il layer '{COMUNI_REQUIRED_LAYER_NAME}' non è caricato nel progetto, "
+                "nessuna cache ISTAT è configurata e nessun nome Comune è "
+                "disponibile per il fetch REST."
             )
 
         if feedback is not None:

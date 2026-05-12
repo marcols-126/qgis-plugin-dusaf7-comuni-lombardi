@@ -672,3 +672,77 @@ class IstatBoundariesClient:
         cache_manager.write_manifest(manifest)
 
         return datasets[ISTAT_CACHE_FOLDER]
+
+    def cached_shapefile_path(self, cache_manager):
+        """Return the path of the cached ISTAT ``.shp`` or ``None``.
+
+        Checks the manifest first; falls back to a directory scan so the cache
+        is usable even when the manifest was wiped manually. The returned path
+        is only considered when all four sidecar files (.shp/.dbf/.shx/.prj)
+        are present on disk.
+        """
+        if cache_manager is None:
+            return None
+
+        try:
+            manifest = cache_manager.read_manifest()
+        except Exception:
+            manifest = {}
+
+        candidate = None
+        datasets = manifest.get("datasets") if isinstance(manifest, dict) else None
+        if isinstance(datasets, dict):
+            entry = datasets.get(ISTAT_CACHE_FOLDER)
+            if isinstance(entry, dict):
+                candidate = entry.get("shapefile_path")
+
+        if candidate and os.path.isfile(candidate):
+            try:
+                validate_extracted_shapefile_components(candidate)
+                return candidate
+            except Exception:
+                pass
+
+        dataset_dir = cache_manager.dataset_dir(ISTAT_CACHE_FOLDER)
+        extract_dir = os.path.join(dataset_dir, ISTAT_EXTRACTED_FOLDER_NAME)
+        if not os.path.isdir(extract_dir):
+            return None
+
+        try:
+            shp_path = resolve_valid_extracted_shapefile(extract_dir, self.expected_layer_name)
+        except Exception:
+            return None
+        return shp_path
+
+    def clear_cache(self, cache_manager):
+        """Remove the ISTAT cache directory and its manifest entry.
+
+        Returns ``True`` when something was removed, ``False`` when no ISTAT
+        cache existed. Failures during manifest write are swallowed so the
+        user can always re-prepare the cache afterwards.
+        """
+        if cache_manager is None:
+            return False
+
+        removed = False
+        dataset_dir = cache_manager.dataset_dir(ISTAT_CACHE_FOLDER)
+        if os.path.isdir(dataset_dir):
+            shutil.rmtree(dataset_dir, ignore_errors=True)
+            removed = True
+
+        try:
+            manifest = cache_manager.read_manifest()
+        except Exception:
+            manifest = {}
+
+        if isinstance(manifest, dict):
+            datasets = manifest.get("datasets")
+            if isinstance(datasets, dict) and ISTAT_CACHE_FOLDER in datasets:
+                datasets.pop(ISTAT_CACHE_FOLDER, None)
+                try:
+                    cache_manager.write_manifest(manifest)
+                    removed = True
+                except Exception:
+                    pass
+
+        return removed
