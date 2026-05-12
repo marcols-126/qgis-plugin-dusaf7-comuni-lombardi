@@ -17,14 +17,15 @@ import os
 
 import processing
 
-from qgis.PyQt.QtCore import Qt, QStringListModel
-from qgis.PyQt.QtGui import QFont
+from qgis.PyQt.QtCore import Qt, QSettings, QStringListModel, QUrl
+from qgis.PyQt.QtGui import QDesktopServices, QFont, QTextCursor
 from qgis.PyQt.QtWidgets import (
     QApplication,
-    QCheckBox,
+    QButtonGroup,
     QCompleter,
     QDialog,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -34,6 +35,7 @@ from qgis.PyQt.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QRadioButton,
     QSizePolicy,
     QSpacerItem,
     QVBoxLayout,
@@ -54,6 +56,51 @@ from ..workflow.data_resolver import (
 
 
 ALGORITHM_ID = "Analisi DUSAF 7:analisi_dusaf7_comune_lombardo"
+README_URL = "https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi#readme"
+
+SETTINGS_PREFIX = "analisi_dusaf7_comune_lombardo"
+SETTINGS_OUTPUT_MODE = f"{SETTINGS_PREFIX}/output_mode"          # "memory"|"project"|"custom"
+SETTINGS_OUTPUT_DIR = f"{SETTINGS_PREFIX}/output_dir"            # last custom dir
+SETTINGS_SLIVER_M2 = f"{SETTINGS_PREFIX}/sliver_min_area_m2"
+SETTINGS_LOAD_INTO_PROJECT = f"{SETTINGS_PREFIX}/load_into_project"
+
+OUTPUT_MODE_MEMORY = "memory"
+OUTPUT_MODE_PROJECT = "project"
+OUTPUT_MODE_CUSTOM = "custom"
+
+
+class _ClickablePathLog(QPlainTextEdit):
+    """Log widget that opens the file/folder under the cursor on double click.
+
+    Recognises absolute paths to ``.gpkg`` / ``.csv`` files in the log lines.
+    On double click, opens the parent folder in the system file manager
+    (Explorer / Finder / xdg-open) so the user can find the outputs quickly.
+    """
+
+    def mouseDoubleClickEvent(self, event):
+        cursor = self.cursorForPosition(event.pos())
+        cursor.select(QTextCursor.LineUnderCursor)
+        line = cursor.selectedText()
+        target = self._extract_path(line)
+        if target:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(target))
+            return
+        super().mouseDoubleClickEvent(event)
+
+    @staticmethod
+    def _extract_path(line):
+        if not line:
+            return None
+        candidate = line.strip()
+        for token in (candidate.rsplit(": ", 1)[-1], candidate):
+            token = token.strip().strip("'\"")
+            if not token:
+                continue
+            if os.path.isfile(token):
+                return os.path.dirname(token) or token
+            if os.path.isdir(token):
+                return token
+        return None
 
 STATUS_OK_STYLE = "color:#006100; background-color:#eefbea; padding:4px; border:1px solid #3caa3c;"
 STATUS_INFO_STYLE = "color:#1a4170; background-color:#e8f1fb; padding:4px; border:1px solid #5c8fce;"
@@ -203,11 +250,14 @@ class DusafMainDialog(QDialog):
         self._comuni_source_origin = None
         self._comuni_source_count = 0
         self._feedback = None
+        self._last_output_dir = ""
+        self._settings = QSettings()
 
         self.setWindowTitle("Analisi DUSAF 7 - Comuni Lombardia")
         self.setMinimumSize(720, 640)
 
         self._build_ui()
+        self._load_settings()
         self._refresh_data_status()
         self._populate_comune_autocomplete()
         self._update_run_state()
@@ -309,19 +359,62 @@ class DusafMainDialog(QDialog):
         )
         params_layout.addRow("Area minima slivers:", self._sliver_spin)
 
-        self._load_into_project_chk = QCheckBox(
-            "Carica i 4 layer di output nel progetto QGIS al termine"
-        )
-        self._load_into_project_chk.setChecked(True)
-        params_layout.addRow("", self._load_into_project_chk)
-
         root.addWidget(params_box)
+
+        # === Output: memory / project folder / custom folder ===
+        output_box = QGroupBox("Output")
+        output_layout = QVBoxLayout(output_box)
+
+        self._output_mode_group = QButtonGroup(self)
+
+        self._mode_memory_radio = QRadioButton(
+            "Solo layer in memoria nel progetto (nessun file su disco, "
+            "no progetto QGIS richiesto)"
+        )
+        self._mode_memory_radio.setToolTip(
+            "Modalità rapida per analisi esplorative. I 4 layer di output "
+            "appaiono nel progetto come layer temporanei (Memory provider). "
+            "Per renderli permanenti: tasto destro -> Rendi permanente."
+        )
+        self._output_mode_group.addButton(self._mode_memory_radio)
+        output_layout.addWidget(self._mode_memory_radio)
+
+        self._mode_project_radio = QRadioButton(
+            "File GeoPackage + CSV nella cartella del progetto QGIS (richiede "
+            "progetto salvato)"
+        )
+        self._output_mode_group.addButton(self._mode_project_radio)
+        output_layout.addWidget(self._mode_project_radio)
+
+        self._mode_custom_radio = QRadioButton(
+            "File GeoPackage + CSV in cartella personalizzata"
+        )
+        self._output_mode_group.addButton(self._mode_custom_radio)
+        output_layout.addWidget(self._mode_custom_radio)
+
+        custom_row = QHBoxLayout()
+        custom_row.addSpacing(22)
+        self._custom_dir_edit = QLineEdit()
+        self._custom_dir_edit.setPlaceholderText("Nessuna cartella selezionata...")
+        custom_row.addWidget(self._custom_dir_edit, stretch=1)
+
+        self._custom_dir_browse_btn = QPushButton("Sfoglia...")
+        self._custom_dir_browse_btn.clicked.connect(self._on_browse_custom_dir)
+        custom_row.addWidget(self._custom_dir_browse_btn)
+        output_layout.addLayout(custom_row)
+
+        self._mode_project_radio.setChecked(True)
+        self._mode_memory_radio.toggled.connect(self._on_output_mode_changed)
+        self._mode_project_radio.toggled.connect(self._on_output_mode_changed)
+        self._mode_custom_radio.toggled.connect(self._on_output_mode_changed)
+
+        root.addWidget(output_box)
 
         # === Esecuzione: log + progress ===
         run_box = QGroupBox("Esecuzione")
         run_layout = QVBoxLayout(run_box)
 
-        self._log_widget = QPlainTextEdit()
+        self._log_widget = _ClickablePathLog()
         self._log_widget.setReadOnly(True)
         self._log_widget.setMaximumBlockCount(2000)
         log_font = QFont("Consolas")
@@ -329,7 +422,12 @@ class DusafMainDialog(QDialog):
         log_font.setPointSize(9)
         self._log_widget.setFont(log_font)
         self._log_widget.setPlaceholderText(
-            "Il log dell'esecuzione apparirà qui dopo aver premuto Esegui."
+            "Il log dell'esecuzione apparirà qui dopo aver premuto Esegui. "
+            "Doppio click su un path apre la cartella nel sistema."
+        )
+        self._log_widget.setToolTip(
+            "Doppio click su una riga che contiene un percorso file/cartella "
+            "valido apre la cartella corrispondente nell'esplora risorse."
         )
         run_layout.addWidget(self._log_widget)
 
@@ -346,10 +444,28 @@ class DusafMainDialog(QDialog):
 
         # === Pulsanti ===
         buttons = QHBoxLayout()
+
+        self._help_btn = QPushButton("?")
+        self._help_btn.setToolTip(
+            "Apre la documentazione del plugin (README su GitHub)."
+        )
+        self._help_btn.setFixedWidth(32)
+        self._help_btn.clicked.connect(self._on_help_clicked)
+        buttons.addWidget(self._help_btn)
+
         self._cancel_btn = QPushButton("Annulla esecuzione")
         self._cancel_btn.setEnabled(False)
         self._cancel_btn.clicked.connect(self._on_cancel_clicked)
         buttons.addWidget(self._cancel_btn)
+
+        self._open_folder_btn = QPushButton("Apri cartella output")
+        self._open_folder_btn.setEnabled(False)
+        self._open_folder_btn.setToolTip(
+            "Apre la cartella dei file di output nell'esplora risorse del "
+            "sistema. Attivo solo dopo un'esecuzione che ha generato file."
+        )
+        self._open_folder_btn.clicked.connect(self._on_open_folder_clicked)
+        buttons.addWidget(self._open_folder_btn)
 
         buttons.addSpacerItem(
             QSpacerItem(40, 1, QSizePolicy.Expanding, QSizePolicy.Minimum)
@@ -365,6 +481,9 @@ class DusafMainDialog(QDialog):
         buttons.addWidget(self._run_btn)
 
         root.addLayout(buttons)
+
+        # Enter inside the Comune field triggers Esegui (when valid)
+        self._comune_input.returnPressed.connect(self._on_comune_return_pressed)
 
     # ------------------------------------------------------------------
     # Data status
@@ -629,6 +748,88 @@ class DusafMainDialog(QDialog):
             comune_ok = _normalize_comune_key(self._comune_input.text()) in self._valid_name_by_key
         self._run_btn.setEnabled(comune_ok)
 
+    # ------------------------------------------------------------------
+    # Output mode + settings persistence
+    # ------------------------------------------------------------------
+
+    def _selected_output_mode(self):
+        if self._mode_memory_radio.isChecked():
+            return OUTPUT_MODE_MEMORY
+        if self._mode_custom_radio.isChecked():
+            return OUTPUT_MODE_CUSTOM
+        return OUTPUT_MODE_PROJECT
+
+    def _on_output_mode_changed(self):
+        is_custom = self._mode_custom_radio.isChecked()
+        self._custom_dir_edit.setEnabled(is_custom)
+        self._custom_dir_browse_btn.setEnabled(is_custom)
+
+    def _on_browse_custom_dir(self):
+        start = self._custom_dir_edit.text().strip() or self._last_output_dir or ""
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "Seleziona cartella di output",
+            start,
+        )
+        if chosen:
+            self._custom_dir_edit.setText(chosen)
+            self._last_output_dir = chosen
+
+    def _load_settings(self):
+        try:
+            mode = self._settings.value(SETTINGS_OUTPUT_MODE, OUTPUT_MODE_PROJECT, type=str)
+        except TypeError:
+            mode = OUTPUT_MODE_PROJECT
+        if mode == OUTPUT_MODE_MEMORY:
+            self._mode_memory_radio.setChecked(True)
+        elif mode == OUTPUT_MODE_CUSTOM:
+            self._mode_custom_radio.setChecked(True)
+        else:
+            self._mode_project_radio.setChecked(True)
+
+        last_dir = self._settings.value(SETTINGS_OUTPUT_DIR, "", type=str) or ""
+        self._last_output_dir = last_dir
+        if last_dir:
+            self._custom_dir_edit.setText(last_dir)
+
+        try:
+            sliver = float(self._settings.value(SETTINGS_SLIVER_M2, 1.0, type=float))
+            if sliver < 0:
+                sliver = 1.0
+            self._sliver_spin.setValue(sliver)
+        except (TypeError, ValueError):
+            pass
+
+        self._on_output_mode_changed()
+
+    def _save_settings(self):
+        self._settings.setValue(SETTINGS_OUTPUT_MODE, self._selected_output_mode())
+        self._settings.setValue(SETTINGS_OUTPUT_DIR, self._custom_dir_edit.text().strip())
+        self._settings.setValue(SETTINGS_SLIVER_M2, float(self._sliver_spin.value()))
+
+    # ------------------------------------------------------------------
+    # Help / Open folder / Enter / log path clicks
+    # ------------------------------------------------------------------
+
+    def _on_help_clicked(self):
+        QDesktopServices.openUrl(QUrl(README_URL))
+
+    def _on_open_folder_clicked(self):
+        target = self._last_output_dir
+        if target and os.path.isdir(target):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(target))
+        else:
+            QMessageBox.information(
+                self,
+                "Cartella non disponibile",
+                "Nessuna cartella di output disponibile. Esegui prima l'analisi "
+                "in modalità file (su disco).",
+            )
+
+    def _on_comune_return_pressed(self):
+        if self._run_btn.isEnabled():
+            self._on_run_clicked()
+
     def _on_refresh_comuni_clicked(self):
         self._log_widget.appendPlainText("[INFO] Forzato refresh della lista Comuni...")
         self._populate_comune_autocomplete(force_refresh=True)
@@ -660,11 +861,25 @@ class DusafMainDialog(QDialog):
 
         canonical = self._valid_name_by_key[key]
         sliver_threshold = float(self._sliver_spin.value())
-        load_into_project = self._load_into_project_chk.isChecked()
+        output_mode = self._selected_output_mode()
+        save_to_disk = output_mode != OUTPUT_MODE_MEMORY
+        custom_dir = self._custom_dir_edit.text().strip()
+
+        if output_mode == OUTPUT_MODE_CUSTOM and not custom_dir:
+            QMessageBox.warning(
+                self,
+                "Cartella mancante",
+                "La modalità 'Cartella personalizzata' è selezionata ma nessuna "
+                "cartella è stata indicata. Premi 'Sfoglia...' per sceglierne una.",
+            )
+            return
+
+        self._save_settings()
 
         self._log_widget.clear()
         self._progress_bar.setValue(0)
         self._set_running_ui(True)
+        self._open_folder_btn.setEnabled(False)
 
         feedback = _DialogFeedback(self._log_widget, self._progress_bar)
         self._feedback = feedback
@@ -672,17 +887,25 @@ class DusafMainDialog(QDialog):
         params = {
             "COMUNE_NAME": canonical,
             "SLIVER_MIN_AREA_M2": sliver_threshold,
+            "SAVE_TO_DISK": save_to_disk,
+            "OUTPUT_DIR_OVERRIDE": custom_dir if output_mode == OUTPUT_MODE_CUSTOM else "",
         }
 
         # Snapshot the project layer ids BEFORE the run so the optional
         # cleanup at the end can only ever touch the layers we just added.
-        # This protects user-loaded layers and outputs from previous runs.
         pre_run_layer_ids = set(QgsProject.instance().mapLayers().keys())
 
         try:
+            mode_label = {
+                OUTPUT_MODE_MEMORY: "Solo memoria",
+                OUTPUT_MODE_PROJECT: "Cartella del progetto QGIS",
+                OUTPUT_MODE_CUSTOM: f"Cartella personalizzata: {custom_dir}",
+            }[output_mode]
             self._log_widget.appendPlainText(
-                f"[INFO] Avvio algoritmo su {canonical} con soglia slivers={sliver_threshold} m²."
+                f"[INFO] Avvio algoritmo su {canonical} con soglia "
+                f"slivers={sliver_threshold} m²."
             )
+            self._log_widget.appendPlainText(f"[INFO] Modalità output: {mode_label}")
             QApplication.processEvents()
 
             result = processing.run(
@@ -691,26 +914,35 @@ class DusafMainDialog(QDialog):
                 feedback=feedback,
             )
 
-            gpkg = result.get("OUTPUT_GPKG", "")
-            csv = result.get("OUTPUT_CSV", "")
+            gpkg = result.get("OUTPUT_GPKG", "") or ""
+            csv = result.get("OUTPUT_CSV", "") or ""
             self._log_widget.appendPlainText("")
             self._log_widget.appendPlainText("[OK] Esecuzione completata.")
-            self._log_widget.appendPlainText(f"     GeoPackage: {gpkg}")
-            self._log_widget.appendPlainText(f"     CSV:        {csv}")
 
-            if not load_into_project:
-                removed = self._cleanup_newly_added_layers(pre_run_layer_ids)
-                if removed:
-                    self._log_widget.appendPlainText(
-                        f"[INFO] Checkbox 'carica nel progetto' disattiva: "
-                        f"rimossi {removed} layer di output appena aggiunti."
-                    )
+            if save_to_disk and gpkg:
+                self._last_output_dir = os.path.dirname(gpkg)
+                self._open_folder_btn.setEnabled(True)
+                self._log_widget.appendPlainText(f"     GeoPackage: {gpkg}")
+                self._log_widget.appendPlainText(f"     CSV:        {csv}")
+                self._log_widget.appendPlainText(
+                    f"     Cartella:   {self._last_output_dir}"
+                )
+                summary = (
+                    f"Il workflow per {canonical} è terminato con successo.\n\n"
+                    f"Output:\n- {gpkg}\n- {csv}"
+                )
+            else:
+                summary = (
+                    f"Il workflow per {canonical} è terminato con successo.\n\n"
+                    "Modalità memoria: i 4 layer di output sono nel progetto come "
+                    "layer temporanei. Tasto destro -> 'Rendi permanente' per "
+                    "salvarli su disco."
+                )
 
             QMessageBox.information(
                 self,
                 "Analisi DUSAF completata",
-                f"Il workflow per {canonical} è terminato con successo.\n\n"
-                f"Output:\n- {gpkg}\n- {csv}",
+                summary,
             )
         except Exception as exc:
             self._log_widget.appendPlainText(f"[ERROR] {exc}")
@@ -732,9 +964,16 @@ class DusafMainDialog(QDialog):
         self._run_btn.setEnabled(not running)
         self._close_btn.setEnabled(not running)
         self._refresh_comuni_btn.setEnabled(not running)
+        self._istat_btn.setEnabled(not running)
         self._comune_input.setEnabled(not running)
         self._sliver_spin.setEnabled(not running)
-        self._load_into_project_chk.setEnabled(not running)
+        self._mode_memory_radio.setEnabled(not running)
+        self._mode_project_radio.setEnabled(not running)
+        self._mode_custom_radio.setEnabled(not running)
+        is_custom = self._mode_custom_radio.isChecked()
+        self._custom_dir_edit.setEnabled(not running and is_custom)
+        self._custom_dir_browse_btn.setEnabled(not running and is_custom)
+        self._help_btn.setEnabled(not running)
         self._cancel_btn.setEnabled(running)
         if running:
             QApplication.setOverrideCursor(Qt.WaitCursor)

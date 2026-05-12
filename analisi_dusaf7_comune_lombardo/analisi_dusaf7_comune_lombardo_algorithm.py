@@ -27,6 +27,7 @@ from qgis.core import (
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingOutputFile,
+    QgsProcessingParameterBoolean,
     QgsProcessingParameterNumber,
     QgsProcessingParameterString,
     QgsProject,
@@ -176,6 +177,14 @@ def _find_project_layer_by_name_and_fields(layer_name, required_fields=None, all
     return None
 
 
+OUTPUT_LAYER_NAME_PREFIXES = (
+    "DUSAF7 ",
+    "Confine ",
+    "QC slivers ",
+    "Com_REST_",
+)
+
+
 def _find_dusaf_project_layer():
     candidates = [
         DUSAF_REQUIRED_LAYER_NAME,
@@ -190,15 +199,33 @@ def _find_dusaf_project_layer():
             required_fields=[DUSAF_CLASS_FIELD, DUSAF_DESC_FIELD],
             allow_contains=True,
         )
-        if layer:
+        if layer and not _looks_like_output_layer(layer):
             return layer
 
     for layer in QgsProject.instance().mapLayers().values():
-        if isinstance(layer, QgsVectorLayer) and layer.isValid():
-            if _layer_has_fields(layer, [DUSAF_CLASS_FIELD, DUSAF_DESC_FIELD]):
-                return layer
+        if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+            continue
+        if _looks_like_output_layer(layer):
+            continue
+        if _layer_has_fields(layer, [DUSAF_CLASS_FIELD, DUSAF_DESC_FIELD]):
+            return layer
 
     return None
+
+
+def _looks_like_output_layer(layer):
+    """Return True when ``layer`` looks like a previous workflow output.
+
+    Excluding these layers from project-layer detection prevents the
+    algorithm from picking, for example, the ``Confine Zibido San Giacomo
+    fix`` layer of a previous run as the Comuni source. Previous outputs
+    carry attribute fields inherited from ISTAT (DEN_COM, COD_REG, ...)
+    so a plain field-based heuristic would happily match them.
+    """
+    if layer is None:
+        return False
+    name = layer.name() or ""
+    return any(name.startswith(p) for p in OUTPUT_LAYER_NAME_PREFIXES)
 
 
 def _find_comuni_project_layer():
@@ -216,13 +243,20 @@ def _find_comuni_project_layer():
             required_fields=[],
             allow_contains=True,
         )
-        if layer and _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES):
+        if (
+            layer
+            and not _looks_like_output_layer(layer)
+            and _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES)
+        ):
             return layer
 
     for layer in QgsProject.instance().mapLayers().values():
-        if isinstance(layer, QgsVectorLayer) and layer.isValid():
-            if _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES):
-                return layer
+        if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+            continue
+        if _looks_like_output_layer(layer):
+            continue
+        if _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES):
+            return layer
 
     return None
 
@@ -500,6 +534,8 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
 
     COMUNE_NAME = "COMUNE_NAME"
     SLIVER_MIN_AREA_M2 = "SLIVER_MIN_AREA_M2"
+    OUTPUT_DIR_OVERRIDE = "OUTPUT_DIR_OVERRIDE"
+    SAVE_TO_DISK = "SAVE_TO_DISK"
 
     OUTPUT_GPKG = "OUTPUT_GPKG"
     OUTPUT_CSV = "OUTPUT_CSV"
@@ -651,6 +687,22 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
+        save_param = QgsProcessingParameterBoolean(
+            self.SAVE_TO_DISK,
+            "Salva GeoPackage e CSV su disco (deselezionare per layer solo in memoria)",
+            defaultValue=True,
+            optional=True,
+        )
+        self.addParameter(save_param)
+
+        output_dir_param = QgsProcessingParameterString(
+            self.OUTPUT_DIR_OVERRIDE,
+            "Cartella output personalizzata (vuoto = usa cartella del progetto)",
+            defaultValue="",
+            optional=True,
+        )
+        self.addParameter(output_dir_param)
+
         self.addOutput(QgsProcessingOutputFile(self.OUTPUT_GPKG, "GeoPackage di output"))
         self.addOutput(QgsProcessingOutputFile(self.OUTPUT_CSV, "CSV riepilogo superfici"))
 
@@ -695,6 +747,53 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         raise QgsProcessingException(
             "MANCA_DATO: il progetto QGIS non è salvato. "
             "Salva prima il progetto .qgz/.qgs per usare output relativi alla cartella del progetto."
+        )
+
+    def _resolve_project_dir(self, override="", require=True):
+        """Resolve the directory used for output files and style lookup.
+
+        Resolution order:
+
+        1. ``override`` (when non-empty): used as-is, created if missing.
+        2. Saved project directory (``QgsProject.fileName()`` or
+           ``homePath()``).
+        3. When ``require=False`` and the previous steps failed, the system
+           temporary directory is returned: callers that do not write any
+           file (e.g. when ``SAVE_TO_DISK`` is False) can still resolve a
+           valid path for style lookups without forcing the user to save
+           the project.
+
+        Raises ``QgsProcessingException`` when ``require=True`` and no
+        valid directory can be derived.
+        """
+        if override:
+            override = os.path.abspath(override)
+            try:
+                os.makedirs(override, exist_ok=True)
+            except OSError as exc:
+                raise QgsProcessingException(
+                    f"Cartella di output non scrivibile: {override} ({exc})."
+                ) from exc
+            return override
+
+        project = QgsProject.instance()
+        if project.fileName():
+            return os.path.dirname(project.fileName())
+
+        home = project.homePath()
+        if home and str(home).strip() not in ("", "."):
+            return os.path.abspath(home)
+
+        if not require:
+            import tempfile
+            return tempfile.gettempdir()
+
+        raise QgsProcessingException(
+            "MANCA_DATO: il progetto QGIS non è salvato e non è stata "
+            "indicata una cartella di output personalizzata. "
+            "Salva il progetto, oppure indica una cartella nel parametro "
+            "'Cartella output personalizzata', oppure disattiva il "
+            "salvataggio su disco per ottenere solo layer in memoria."
         )
 
     # -------------------------------------------------------------------------
@@ -1055,6 +1154,18 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         comune_name_input = self.parameterAsString(parameters, self.COMUNE_NAME, context).strip()
         sliver_min_area_m2 = self.parameterAsDouble(parameters, self.SLIVER_MIN_AREA_M2, context)
 
+        save_to_disk = True
+        try:
+            save_to_disk = bool(
+                self.parameterAsBool(parameters, self.SAVE_TO_DISK, context)
+            )
+        except Exception:
+            save_to_disk = True
+
+        output_dir_override = self.parameterAsString(
+            parameters, self.OUTPUT_DIR_OVERRIDE, context
+        ).strip()
+
         if not comune_name_input:
             raise QgsProcessingException(
                 "COMUNE NON VALIDO: il campo Comune è vuoto. "
@@ -1064,7 +1175,10 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         if sliver_min_area_m2 < 0:
             raise QgsProcessingException("L'area minima degli slivers non può essere negativa.")
 
-        project_dir = self._project_dir()
+        project_dir = self._resolve_project_dir(
+            override=output_dir_override,
+            require=save_to_disk,
+        )
 
         # === RISOLUZIONE FONTE COMUNI ==========================================
         # Priorità: layer caricato nel progetto (back-compat); altrimenti fetch
@@ -1428,111 +1542,178 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
 
         feedback.setProgress(90)
 
-        self._msg(feedback, "------------------------------------------------------")
-        self._msg(feedback, "FASE 8 - Salvataggio output")
-        self._msg(feedback, "------------------------------------------------------")
+        if save_to_disk:
+            self._msg(feedback, "------------------------------------------------------")
+            self._msg(feedback, "FASE 8 - Salvataggio output (GeoPackage + CSV)")
+            self._msg(feedback, "------------------------------------------------------")
 
-        output.save_layer_to_gpkg(
-            dusaf_final,
-            gpkg_path,
-            f"dusaf7_{safe_comune}_superfici",
-            overwrite_file=True,
-            context=context,
-            feedback=feedback,
-        )
-
-        output.save_layer_to_gpkg(
-            dusaf_clip_qc,
-            gpkg_path,
-            f"dusaf7_{safe_comune}_clip_qc",
-            overwrite_file=False,
-            context=context,
-            feedback=feedback,
-        )
-
-        output.save_layer_to_gpkg(
-            comune_fix,
-            gpkg_path,
-            f"confine_{safe_comune}_fix",
-            overwrite_file=False,
-            context=context,
-            feedback=feedback,
-        )
-
-        if slivers_layer.featureCount() > 0:
             output.save_layer_to_gpkg(
-                slivers_layer,
+                dusaf_final,
                 gpkg_path,
-                f"qc_slivers_{safe_comune}",
+                f"dusaf7_{safe_comune}_superfici",
+                overwrite_file=True,
+                context=context,
+                feedback=feedback,
+            )
+
+            output.save_layer_to_gpkg(
+                dusaf_clip_qc,
+                gpkg_path,
+                f"dusaf7_{safe_comune}_clip_qc",
                 overwrite_file=False,
                 context=context,
                 feedback=feedback,
             )
 
-        output.export_summary_csv(
-            dusaf_final,
-            class_field,
-            desc_field,
-            csv_path,
-            feedback,
-        )
+            output.save_layer_to_gpkg(
+                comune_fix,
+                gpkg_path,
+                f"confine_{safe_comune}_fix",
+                overwrite_file=False,
+                context=context,
+                feedback=feedback,
+            )
 
-        feedback.setProgress(96)
+            if slivers_layer.featureCount() > 0:
+                output.save_layer_to_gpkg(
+                    slivers_layer,
+                    gpkg_path,
+                    f"qc_slivers_{safe_comune}",
+                    overwrite_file=False,
+                    context=context,
+                    feedback=feedback,
+                )
 
-        self._msg(feedback, "------------------------------------------------------")
-        self._msg(feedback, "FASE 9 - Caricamento output nel progetto e stili QML")
-        self._msg(feedback, "------------------------------------------------------")
+            output.export_summary_csv(
+                dusaf_final,
+                class_field,
+                desc_field,
+                csv_path,
+                feedback,
+            )
 
-        output.add_saved_layer_to_project(
-            gpkg_path,
-            f"dusaf7_{safe_comune}_superfici",
-            f"DUSAF7 {comune_name} - superfici ha %",
-            feedback,
-            plugin_dir=PLUGIN_DIR,
-            project_dir=project_dir,
-            style_filename=STYLE_DUSAF_FINAL,
-        )
+            feedback.setProgress(96)
 
-        output.add_saved_layer_to_project(
-            gpkg_path,
-            f"dusaf7_{safe_comune}_clip_qc",
-            f"DUSAF7 {comune_name} - clip QC",
-            feedback,
-            plugin_dir=PLUGIN_DIR,
-            project_dir=project_dir,
-            style_filename=STYLE_DUSAF_CLIP_QC,
-        )
+            self._msg(feedback, "------------------------------------------------------")
+            self._msg(feedback, "FASE 9 - Caricamento output nel progetto e stili QML")
+            self._msg(feedback, "------------------------------------------------------")
 
-        output.add_saved_layer_to_project(
-            gpkg_path,
-            f"confine_{safe_comune}_fix",
-            f"Confine {comune_name} fix",
-            feedback,
-            plugin_dir=PLUGIN_DIR,
-            project_dir=project_dir,
-            style_filename=STYLE_CONFINE,
-        )
-
-        if slivers_layer.featureCount() > 0:
             output.add_saved_layer_to_project(
                 gpkg_path,
-                f"qc_slivers_{safe_comune}",
-                f"QC slivers DUSAF7 {comune_name}",
+                f"dusaf7_{safe_comune}_superfici",
+                f"DUSAF7 {comune_name} - superfici ha %",
                 feedback,
                 plugin_dir=PLUGIN_DIR,
                 project_dir=project_dir,
-                style_filename=STYLE_SLIVERS,
+                style_filename=STYLE_DUSAF_FINAL,
             )
+
+            output.add_saved_layer_to_project(
+                gpkg_path,
+                f"dusaf7_{safe_comune}_clip_qc",
+                f"DUSAF7 {comune_name} - clip QC",
+                feedback,
+                plugin_dir=PLUGIN_DIR,
+                project_dir=project_dir,
+                style_filename=STYLE_DUSAF_CLIP_QC,
+            )
+
+            output.add_saved_layer_to_project(
+                gpkg_path,
+                f"confine_{safe_comune}_fix",
+                f"Confine {comune_name} fix",
+                feedback,
+                plugin_dir=PLUGIN_DIR,
+                project_dir=project_dir,
+                style_filename=STYLE_CONFINE,
+            )
+
+            if slivers_layer.featureCount() > 0:
+                output.add_saved_layer_to_project(
+                    gpkg_path,
+                    f"qc_slivers_{safe_comune}",
+                    f"QC slivers DUSAF7 {comune_name}",
+                    feedback,
+                    plugin_dir=PLUGIN_DIR,
+                    project_dir=project_dir,
+                    style_filename=STYLE_SLIVERS,
+                )
+        else:
+            self._msg(feedback, "------------------------------------------------------")
+            self._msg(feedback, "FASE 8 - SALTATA (salvataggio su disco disattivato)")
+            self._msg(feedback, "------------------------------------------------------")
+            gpkg_path = ""
+            csv_path = ""
+
+            self._msg(feedback, "------------------------------------------------------")
+            self._msg(feedback, "FASE 9 - Caricamento layer temporanei nel progetto")
+            self._msg(feedback, "------------------------------------------------------")
+
+            self._add_memory_layer_to_project(
+                dusaf_final,
+                f"DUSAF7 {comune_name} - superfici ha %",
+                STYLE_DUSAF_FINAL,
+                project_dir,
+                feedback,
+            )
+            self._add_memory_layer_to_project(
+                dusaf_clip_qc,
+                f"DUSAF7 {comune_name} - clip QC",
+                STYLE_DUSAF_CLIP_QC,
+                project_dir,
+                feedback,
+            )
+            self._add_memory_layer_to_project(
+                comune_fix,
+                f"Confine {comune_name} fix",
+                STYLE_CONFINE,
+                project_dir,
+                feedback,
+            )
+            if slivers_layer.featureCount() > 0:
+                self._add_memory_layer_to_project(
+                    slivers_layer,
+                    f"QC slivers DUSAF7 {comune_name}",
+                    STYLE_SLIVERS,
+                    project_dir,
+                    feedback,
+                )
+
+            feedback.setProgress(96)
 
         feedback.setProgress(100)
 
         self._msg(feedback, "======================================================")
         self._msg(feedback, "WORKFLOW COMPLETATO")
         self._msg(feedback, "======================================================")
-        self._msg(feedback, f"GeoPackage: {gpkg_path}")
-        self._msg(feedback, f"CSV:        {csv_path}")
+        if save_to_disk:
+            self._msg(feedback, f"GeoPackage: {gpkg_path}")
+            self._msg(feedback, f"CSV:        {csv_path}")
+        else:
+            self._msg(feedback, "Modalità memoria: nessun file su disco.")
 
         return {
             self.OUTPUT_GPKG: gpkg_path,
             self.OUTPUT_CSV: csv_path,
         }
+
+    def _add_memory_layer_to_project(self, layer, display_name, style_filename, project_dir, feedback):
+        """Add an in-memory layer to the current project with the given style.
+
+        Used when ``SAVE_TO_DISK`` is False so the user gets the same four
+        styled outputs as the file mode, but only as Processing temporary
+        layers (they vanish when QGIS is closed unless the user makes them
+        permanent via right-click).
+        """
+        if layer is None or not layer.isValid():
+            self._warn(feedback, f"[WARN] Layer non valido, salto: {display_name}")
+            return
+
+        try:
+            layer.setName(display_name)
+        except Exception:
+            pass
+
+        output.apply_style(layer, PLUGIN_DIR, project_dir, style_filename, feedback)
+        QgsProject.instance().addMapLayer(layer)
+        self._msg(feedback, f"[OK] Aggiunto al progetto QGIS (memoria): {display_name}")
