@@ -21,13 +21,16 @@ except Exception:
 
 from qgis.core import (
     QgsApplication,
+    QgsCoordinateTransform,
     QgsFeatureRequest,
+    QgsProcessing,
     QgsProcessingAlgorithm,
     QgsProcessingException,
     QgsProcessingOutputFile,
     QgsProcessingParameterNumber,
     QgsProcessingParameterString,
     QgsProject,
+    QgsRectangle,
     QgsVectorLayer,
 )
 
@@ -697,19 +700,41 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
     # LAYER E VALIDAZIONE COMUNE
     # -------------------------------------------------------------------------
 
-    def _get_required_dusaf_layer(self, comune_geometry_layer=None, feedback=None):
+    def _get_required_dusaf_layer(self, comune_geometry_layer=None, feedback=None, context=None):
         """Return a DUSAF layer.
 
         Priority: layer already loaded in the QGIS project (back-compat); when
         not available the layer is fetched from the Regione Lombardia ArcGIS
         REST service for the envelope of ``comune_geometry_layer`` and returned
         as an in-memory layer in EPSG:32632.
+
+        When the project layer is used AND a Comune geometry is available, the
+        layer is pre-filtered to the Comune envelope via ``native:extractbyextent``
+        before being returned. This avoids running fix_geometries and reproject
+        on the entire Lombardia dataset (millions of features) when we only
+        need the subset that overlaps the selected Comune.
         """
         layer = _find_dusaf_project_layer()
 
         if layer is not None and layer.isValid():
             if feedback is not None:
                 feedback.pushInfo(f"[DATA] DUSAF da progetto: {layer.name()}")
+
+            if comune_geometry_layer is not None and context is not None:
+                try:
+                    prefiltered = self._prefilter_dusaf_by_envelope(
+                        layer, comune_geometry_layer, context, feedback
+                    )
+                    if prefiltered is not None:
+                        return prefiltered
+                except Exception as exc:
+                    if feedback is not None:
+                        self._warn(
+                            feedback,
+                            f"[WARN] Pre-filtro DUSAF al bbox del Comune fallito ({exc}). "
+                            "Procedo con il layer completo (più lento).",
+                        )
+
             return layer
 
         if comune_geometry_layer is None:
@@ -797,6 +822,92 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             )
 
         return rest_layer
+
+    def _prefilter_dusaf_by_envelope(self, dusaf_layer, comune_geometry_layer, context, feedback):
+        """Extract only the DUSAF features inside the Comune envelope.
+
+        Optimisation for back-compat mode: when DUSAF7 is loaded as the full
+        Lombardia dataset, fix_geometries + reproject + clip would touch
+        millions of features for nothing. We pre-filter via
+        ``native:extractbyextent`` so the heavy steps only operate on the
+        subset that actually overlaps the selected Comune.
+
+        Returns the filtered layer (a Processing temporary output) or ``None``
+        when the optimisation cannot be applied. The caller is responsible
+        for falling back to the original layer when this returns ``None``.
+        """
+        if dusaf_layer is None or comune_geometry_layer is None:
+            return None
+
+        original_count = dusaf_layer.featureCount()
+        comune_extent = comune_geometry_layer.extent()
+        if comune_extent.isEmpty():
+            return None
+
+        src_crs = comune_geometry_layer.crs()
+        dst_crs = dusaf_layer.crs()
+
+        if src_crs.isValid() and dst_crs.isValid() and src_crs != dst_crs:
+            transform = QgsCoordinateTransform(
+                src_crs, dst_crs, QgsProject.instance().transformContext()
+            )
+            comune_extent = transform.transformBoundingBox(comune_extent)
+
+        padding = 0.001 if dst_crs.isGeographic() else 50.0
+        padded = QgsRectangle(
+            comune_extent.xMinimum() - padding,
+            comune_extent.yMinimum() - padding,
+            comune_extent.xMaximum() + padding,
+            comune_extent.yMaximum() + padding,
+        )
+
+        crs_authid = dst_crs.authid() if dst_crs.authid() else "EPSG:32632"
+        extent_string = "{},{},{},{} [{}]".format(
+            padded.xMinimum(),
+            padded.xMaximum(),
+            padded.yMinimum(),
+            padded.yMaximum(),
+            crs_authid,
+        )
+
+        if feedback is not None:
+            feedback.pushInfo(
+                "[OPTIMIZATION] Pre-filtro DUSAF al bbox del Comune "
+                f"({crs_authid}) prima di fix/reproject..."
+            )
+
+        filtered_layer = pipeline.run_algorithm(
+            "native:extractbyextent",
+            {
+                "INPUT": dusaf_layer,
+                "EXTENT": extent_string,
+                "CLIP": False,
+                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
+            },
+            context,
+            feedback,
+            "DUSAF7_prefilter_bbox",
+        )
+
+        new_count = filtered_layer.featureCount()
+        if feedback is not None:
+            feedback.pushInfo(
+                f"[OPTIMIZATION] DUSAF pre-filtrato: {new_count} feature "
+                f"(era {original_count}) -> risparmio "
+                f"{(1 - new_count / max(original_count, 1)) * 100:.1f}%."
+            )
+
+        if new_count == 0:
+            if feedback is not None:
+                self._warn(
+                    feedback,
+                    "[WARN] Pre-filtro ha restituito 0 feature DUSAF. "
+                    "Verifica sovrapposizione geografica tra DUSAF e Comune; "
+                    "procedo con il layer originale.",
+                )
+            return None
+
+        return filtered_layer
 
     def _validate_comune_name_on_layer(self, comuni_layer, comune_name, feedback):
         municipality_field = self._resolve_first_available_field(
@@ -1096,6 +1207,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         dusaf = self._get_required_dusaf_layer(
             comune_geometry_layer=comune_fix,
             feedback=feedback,
+            context=context,
         )
 
         if dusaf.source() == comuni.source():
