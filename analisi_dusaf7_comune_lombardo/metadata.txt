@@ -6,7 +6,7 @@
 name=Analisi DUSAF 7 Comune Lombardo
 qgisMinimumVersion=3.34
 description=Automated DUSAF 7 land-use analysis for Lombardy municipalities via Regione Lombardia REST services. QC-4 audit, GeoPackage + CSV export. (Plugin regionale italiano.)
-version=0.2.2
+version=0.2.3
 author=Marco Stefano La Sala
 email=214729081+marcols-126@users.noreply.github.com
 
@@ -27,7 +27,12 @@ repository=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi
 
 hasProcessingProvider=yes
 
-changelog=0.2.2 (2026-05-12)
+changelog=0.2.3 (2026-05-12)
+        - Add LICENSE file (no extension) at the plugin root so the QGIS
+          Plugin Repository validator stops complaining
+          ("Cannot find LICENSE in the plugin package").
+        - Content is the same AGPL-3.0 text already in LICENSE.txt.
+    0.2.2 (2026-05-12)
         - Metadata description and about now bilingual (English + Italian)
           to satisfy the QGIS Plugin Repository review checklist
         - Extended tags with English variants for international discoverability
