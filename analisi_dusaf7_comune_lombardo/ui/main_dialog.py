@@ -646,6 +646,11 @@ class DusafMainDialog(QDialog):
             "SLIVER_MIN_AREA_M2": sliver_threshold,
         }
 
+        # Snapshot the project layer ids BEFORE the run so the optional
+        # cleanup at the end can only ever touch the layers we just added.
+        # This protects user-loaded layers and outputs from previous runs.
+        pre_run_layer_ids = set(QgsProject.instance().mapLayers().keys())
+
         try:
             self._log_widget.appendPlainText(
                 f"[INFO] Avvio algoritmo su {canonical} con soglia slivers={sliver_threshold} m²."
@@ -666,7 +671,12 @@ class DusafMainDialog(QDialog):
             self._log_widget.appendPlainText(f"     CSV:        {csv}")
 
             if not load_into_project:
-                self._cleanup_output_layers(canonical)
+                removed = self._cleanup_newly_added_layers(pre_run_layer_ids)
+                if removed:
+                    self._log_widget.appendPlainText(
+                        f"[INFO] Checkbox 'carica nel progetto' disattiva: "
+                        f"rimossi {removed} layer di output appena aggiunti."
+                    )
 
             QMessageBox.information(
                 self,
@@ -704,29 +714,20 @@ class DusafMainDialog(QDialog):
             QApplication.restoreOverrideCursor()
             self._update_run_state()
 
-    def _cleanup_output_layers(self, comune_name):
-        """Remove the auto-added output layers when the user opted out.
+    def _cleanup_newly_added_layers(self, pre_run_layer_ids):
+        """Remove only layers added DURING the current run.
 
-        The algorithm always adds the four output layers to the project. When
-        the dialog checkbox is off we remove them right after the run so the
-        user only keeps the GPKG file on disk.
+        We compare the project layer ids before and after the algorithm runs
+        and remove only those that appeared in between. This guarantees we
+        never touch user-loaded layers or outputs from a previous algorithm
+        run, even when they share names with the new outputs.
         """
         try:
             project = QgsProject.instance()
-            tokens = [
-                f"DUSAF7 {comune_name.upper()}",
-                f"DUSAF7 {comune_name}",
-                f"Confine {comune_name.upper()}",
-                f"Confine {comune_name}",
-                f"QC slivers DUSAF7 {comune_name.upper()}",
-                f"QC slivers DUSAF7 {comune_name}",
-            ]
-            to_remove = []
-            for layer in project.mapLayers().values():
-                name = layer.name()
-                if any(name.startswith(tok) for tok in tokens):
-                    to_remove.append(layer.id())
-            for layer_id in to_remove:
+            current_ids = set(project.mapLayers().keys())
+            new_ids = [lid for lid in current_ids if lid not in pre_run_layer_ids]
+            for layer_id in new_ids:
                 project.removeMapLayer(layer_id)
+            return len(new_ids)
         except Exception:
-            pass
+            return 0
