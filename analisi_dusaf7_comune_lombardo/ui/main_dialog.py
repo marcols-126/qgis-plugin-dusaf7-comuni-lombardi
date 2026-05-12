@@ -397,6 +397,43 @@ class DusafMainDialog(QDialog):
 
         root.addWidget(params_box)
 
+        # === Cosa ottieni: spiegazione output ===
+        info_box = QGroupBox("Cosa ottieni dopo l'esecuzione")
+        info_layout = QVBoxLayout(info_box)
+
+        info_label = QLabel(
+            "<style>li { margin-bottom:4px; }</style>"
+            "<p style='margin:0 0 6px 0;'>Il workflow produce <b>4 layer</b> "
+            "(più 1 CSV se modalità file). Stili QML applicati automaticamente.</p>"
+            "<ul style='margin:0; padding-left:18px;'>"
+            "<li><b>DUSAF7 &lt;Comune&gt; - superfici ha %</b>: una feature per "
+            "<i>classe DUSAF</i> con campi <code>area_m2</code>, <code>area_ha</code>, "
+            "<code>pct_dusaf</code> (% sul totale DUSAF clippato), "
+            "<code>pct_comune</code> (% sul perimetro Comune). "
+            "<b>Layer principale per statistiche.</b></li>"
+            "<li><b>DUSAF7 &lt;Comune&gt; - clip QC</b>: tutte le feature DUSAF "
+            "ritagliate sul Comune, una per poligono originale. "
+            "Categorizzato per codice classe. Utile per ispezione visiva e "
+            "controllo qualità.</li>"
+            "<li><b>Confine &lt;Comune&gt; fix</b>: il perimetro del Comune "
+            "selezionato (1 feature), per riferimento e overlay.</li>"
+            "<li><b>QC slivers DUSAF7 &lt;Comune&gt;</b>: frammenti residui di "
+            "clip con area &le; soglia (presente solo se ne esistono).</li>"
+            "</ul>"
+            "<p style='margin:6px 0 0 0;'>In modalità file: <b>CSV</b> "
+            "riepilogo con codice DUSAF, descrizione, area m²/ha, percentuali "
+            "(separatore <code>;</code>, encoding UTF-8 BOM, apribile con "
+            "Excel/LibreOffice).</p>"
+        )
+        info_label.setTextFormat(Qt.RichText)
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet(
+            "QLabel { background-color:#f6f8fa; padding:6px; "
+            "border:1px solid #d0d7de; font-size:90%; }"
+        )
+        info_layout.addWidget(info_label)
+        root.addWidget(info_box)
+
         # === Output: memory / project folder / custom folder ===
         output_box = QGroupBox("Output")
         output_layout = QVBoxLayout(output_box)

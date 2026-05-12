@@ -990,18 +990,29 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 f"({crs_authid}) prima di fix/reproject..."
             )
 
-        filtered_layer = pipeline.run_algorithm(
-            "native:extractbyextent",
-            {
-                "INPUT": dusaf_layer,
-                "EXTENT": extent_string,
-                "CLIP": False,
-                "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
-            },
-            context,
-            feedback,
-            "DUSAF7_prefilter_bbox",
-        )
+        # Tolerate invalid geometries during the extract step: the desktop
+        # DUSAF7 dataset typically has a few thousand invalid features that
+        # cause native:extractbyextent to abort. Skipping invalid features
+        # is safe here because FASE 1 (fix_geometries) of the workflow
+        # repairs them later anyway. We restore the original setting in a
+        # finally block to avoid leaking it onto subsequent algorithms.
+        original_invalid_check = context.invalidGeometryCheck()
+        try:
+            context.setInvalidGeometryCheck(QgsFeatureRequest.GeometrySkipInvalid)
+            filtered_layer = pipeline.run_algorithm(
+                "native:extractbyextent",
+                {
+                    "INPUT": dusaf_layer,
+                    "EXTENT": extent_string,
+                    "CLIP": False,
+                    "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
+                },
+                context,
+                feedback,
+                "DUSAF7_prefilter_bbox",
+            )
+        finally:
+            context.setInvalidGeometryCheck(original_invalid_check)
 
         new_count = filtered_layer.featureCount()
         if feedback is not None:
