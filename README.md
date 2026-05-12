@@ -10,6 +10,43 @@ dai servizi REST ufficiali di Regione Lombardia, con cache locale nel
 profilo QGIS e con un'opzione per usare i confini ufficiali ISTAT come
 fonte autoritativa.
 
+## Screenshots
+
+### Dialog principale
+
+Pannello "Stato dati" con badge verde/azzurro/rosso, autocomplete del
+Comune case-insensitive, parametri (soglia slivers), sezione che
+spiega cosa ottieni dopo l'esecuzione, scelta modalità output
+(memoria / cartella progetto / cartella personalizzata), log live e
+progress bar.
+
+![Dialog principale](docs/screenshots/01-dialog-principale.png)
+
+### Output sulla mappa
+
+Esempio di esecuzione su **Milano**: i 4 layer di output appaiono
+nel progetto con gli stili QML applicati automaticamente. Bordo rosso
+del Comune sovrapposto alla simbologia categorizzata di DUSAF 7.
+
+![Output Milano](docs/screenshots/02-output-mappa-milano.png)
+
+### Tabella attributi per classe
+
+Il layer principale `DUSAF7 <Comune> - superfici ha %` contiene una
+feature per ogni classe DUSAF presente nel Comune, con le statistiche
+aggregate: `area_m2`, `area_ha`, `pct_dusaf` (% sul totale DUSAF
+clippato) e `pct_comune` (% sul perimetro del Comune).
+
+![Tabella attributi superfici](docs/screenshots/03-tabella-attributi-superfici.png)
+
+### Messaggio di completamento
+
+Al termine il plugin riepiloga i percorsi dei file di output e (in
+modalità memoria) ricorda all'utente che i layer sono temporanei e
+possono essere resi permanenti dal menu contestuale.
+
+![Esecuzione completata](docs/screenshots/04-esecuzione-completata.png)
+
 ## Compatibilità
 
 - **QGIS**: 3.34 → 4.99
