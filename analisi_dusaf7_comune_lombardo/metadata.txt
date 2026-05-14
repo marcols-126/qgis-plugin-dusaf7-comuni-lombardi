@@ -6,7 +6,7 @@
 name=Analisi DUSAF 7 Comune Lombardo
 qgisMinimumVersion=3.34
 description=Automated DUSAF 7 land-use analysis for Lombardy municipalities via Regione Lombardia REST services. QC-4 audit, GeoPackage + CSV export. (Plugin regionale italiano.)
-version=0.2.4
+version=0.2.5
 author=Marco Stefano La Sala
 email=214729081+marcols-126@users.noreply.github.com
 
@@ -27,7 +27,18 @@ repository=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi
 
 hasProcessingProvider=yes
 
-changelog=0.2.4 (2026-05-17)
+changelog=0.2.5 (2026-05-17)
+        - Remove the remaining Plugin Builder dev-tool folders that
+          plugins.qgis.org "Suspicious Files" scanner flagged:
+          * help/ (Sphinx docs scaffolding, including help/make.bat and
+            help/Makefile)
+          * scripts/ (translation helpers: compile-strings.sh,
+            update-strings.sh, run-env-linux.sh)
+          None of these are used at runtime by QGIS; we keep README.md as
+          the user-facing documentation. The dev-only Makefile and
+          pb_tool.cfg at the plugin root are unchanged: they are inert
+          text files and were not flagged.
+    0.2.4 (2026-05-17)
         - Bandit security fixes (4 issues raised by the plugins.qgis.org
           scanner that blocked the 0.2.3 upload):
           * Add explicit URL scheme validation (http/https only) before
