@@ -171,12 +171,15 @@ def _find_project_layer(name_candidates, required_fields):
             os.path.basename(layer.source().split("|")[0])
         )[0].lower()
 
-        name_match = any(
-            cand.lower() == layer_name or
-            cand.lower() == source_stem or
-            cand.lower() in layer_name
-            for cand in name_candidates
-        )
+        def _matches(cand):
+            cand_lower = cand.lower()
+            return any((
+                cand_lower == layer_name,
+                cand_lower == source_stem,
+                cand_lower in layer_name,
+            ))
+
+        name_match = any(_matches(cand) for cand in name_candidates)
 
         if name_match and _has_field(layer, required_fields):
             return layer
@@ -1103,4 +1106,3 @@ class DusafMainDialog(QDialog):
         else:
             QApplication.restoreOverrideCursor()
             self._update_run_state()
-

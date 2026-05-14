@@ -628,11 +628,9 @@ class LombardiaDusafClient:
                     callback=callback,
                     feedback=feedback,
                     message=(
-                        "DUSAF fetch stopped after reaching max_pages={}. ".format(max_pages) +
-                        "{} features collected; more features may be available.".format(
-                            len(features)
-                        )
-                    ),
+                        "DUSAF fetch stopped after reaching max_pages={}. "
+                        "{} features collected; more features may be available."
+                    ).format(max_pages, len(features)),
                 )
                 break
 

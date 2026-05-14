@@ -162,11 +162,11 @@ def _find_project_layer_by_name_and_fields(layer_name, required_fields=None, all
         layer_name_current = layer.name().strip()
         layer_name_clean = layer_name_current.split("[")[0].strip().lower()
 
-        name_match = (
-            layer_name_current.lower() == target or
-            layer_name_clean == target or
-            source_name == target
-        )
+        name_match = any((
+            layer_name_current.lower() == target,
+            layer_name_clean == target,
+            source_name == target,
+        ))
 
         if allow_contains:
             name_match = name_match or target in layer_name_current.lower()
@@ -243,11 +243,11 @@ def _find_comuni_project_layer():
             required_fields=[],
             allow_contains=True,
         )
-        if (
-            layer and
-            not _looks_like_output_layer(layer) and
-            _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES)
-        ):
+        if all((
+            layer,
+            not _looks_like_output_layer(layer),
+            _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES),
+        )):
             return layer
 
     for layer in QgsProject.instance().mapLayers().values():

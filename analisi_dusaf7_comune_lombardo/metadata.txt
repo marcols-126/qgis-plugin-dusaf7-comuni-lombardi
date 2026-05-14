@@ -6,7 +6,7 @@
 name=Analisi DUSAF 7 Comune Lombardo
 qgisMinimumVersion=3.34
 description=Automated DUSAF 7 land-use analysis for Lombardy municipalities via Regione Lombardia REST services. QC-4 audit, GeoPackage + CSV export. (Plugin regionale italiano.)
-version=0.2.6
+version=0.2.7
 author=Marco Stefano La Sala
 email=214729081+marcols-126@users.noreply.github.com
 
@@ -29,7 +29,29 @@ repository=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi
 
 hasProcessingProvider=yes
 
-changelog=0.2.6 (2026-05-17)
+changelog=0.2.7 (2026-05-17)
+        - Code Quality scanner reported 8 W504 ("line break after binary
+          operator") and 1 W391 ("blank line at end of file") because the
+          plugins.qgis.org Flake8 configuration enables BOTH W503 and W504,
+          which are mutually exclusive. The 0.2.6 fix that satisfied W503
+          ended up triggering W504. To satisfy both at once we removed the
+          multi-line boolean expressions entirely:
+          * algorithm.py: the two name/membership tests in
+            _find_project_layer_by_name_and_fields and
+            _find_comuni_project_layer now use any()/all() over a tuple
+            of boolean atoms (no binary operator on the indentation
+            boundary).
+          * lombardia_dusaf_client.py: the long "max_pages reached" log
+            line is now a single .format() call over implicit string
+            concatenation.
+          * main_dialog.py: the membership test in _find_project_layer
+            became a small _matches() inner helper that returns any()
+            over a tuple, called from any(_matches(cand) for cand ...).
+          * main_dialog.py W391: removed the extra blank line left at
+            end of file by the 0.2.6 cleanup of _cleanup_newly_added_layers.
+        - No functional change: pytest still 97/97 green; Bandit Medium/High
+          still 0 issues.
+    0.2.6 (2026-05-17)
         - Data attribution clarified: explicit CC BY 4.0 statement for
           the third-party datasets the plugin consumes (DUSAF 7.0 and
           Ambiti Amministrativi from Regione Lombardia Geoportale; ISTAT
