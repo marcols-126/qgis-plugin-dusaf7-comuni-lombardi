@@ -5,3 +5,6 @@ __pycache__/
 .vscode/
 .idea/
 *.tmp
+
+# Distribution ZIPs live only as GitHub Release assets, never in the repo
+analisi_dusaf7_comune_lombardo-*.zip
