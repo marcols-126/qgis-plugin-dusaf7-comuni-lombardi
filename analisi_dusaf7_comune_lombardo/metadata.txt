@@ -6,7 +6,7 @@
 name=Analisi DUSAF 7 Comune Lombardo
 qgisMinimumVersion=3.34
 description=Automated DUSAF 7 land-use analysis for Lombardy municipalities via Regione Lombardia REST services. QC-4 audit, GeoPackage + CSV export. (Plugin regionale italiano.)
-version=0.2.3
+version=0.2.4
 author=Marco Stefano La Sala
 email=214729081+marcols-126@users.noreply.github.com
 
@@ -27,7 +27,19 @@ repository=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi
 
 hasProcessingProvider=yes
 
-changelog=0.2.3 (2026-05-12)
+changelog=0.2.4 (2026-05-17)
+        - Bandit security fixes (4 issues raised by the plugins.qgis.org
+          scanner that blocked the 0.2.3 upload):
+          * Add explicit URL scheme validation (http/https only) before
+            every urlopen() call in lombardia_dusaf_client,
+            lombardia_comuni_client and istat_boundaries_client. The
+            urlopen() lines are tagged "# nosec B310 - scheme validated
+            above" to suppress the warning for an explicitly checked path.
+          * Remove the Plugin Builder boilerplate plugin_upload.py from the
+            distributed package. It was a developer-only CLI script that
+            imported xmlrpc.client (Bandit B411) and never ran inside QGIS;
+            uploads to plugins.qgis.org happen via the web UI.
+    0.2.3 (2026-05-12)
         - Add LICENSE file (no extension) at the plugin root so the QGIS
           Plugin Repository validator stops complaining
           ("Cannot find LICENSE in the plugin package").
