@@ -179,6 +179,46 @@ separati `COD_TOT` e `DESCR` sul layer in memoria, più `DESCR_RAW` per
 audit. Per la massima precisione LIV5 conviene caricare nel progetto
 il DUSAF7 desktop completo come back-compat.
 
+## Attribuzione dati / Data attribution
+
+Il plugin elabora dati di terze parti, ciascuno con la propria
+licenza. Quando pubblichi o condividi gli output del workflow
+(GeoPackage, CSV, mappe, report), riporta la seguente attribuzione.
+
+### Dati Regione Lombardia
+
+- **DUSAF 7.0 — Uso del suolo**
+  Publisher: Regione Lombardia — Geoportale della Lombardia.
+  Licenza: [Creative Commons Attribuzione 4.0 Internazionale (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/deed.it).
+- **Ambiti Amministrativi Lombardia — Confini comunali**
+  Publisher: Regione Lombardia (servizio ArcGIS REST).
+  Licenza: CC BY 4.0 (default del Geoportale della Lombardia).
+
+### Dati ISTAT (opzionali)
+
+- **Confini delle unità amministrative a fini statistici — anno 2026**
+  Publisher: Istituto Nazionale di Statistica (ISTAT).
+  Licenza: [Creative Commons Attribuzione 4.0 Internazionale (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
+
+### Formula di citazione consigliata
+
+Da inserire in relazioni, mappe, presentazioni che usano l'output:
+
+> Elaborazione basata su dati **DUSAF 7.0** e **Ambiti Amministrativi**
+> © Regione Lombardia, CC BY 4.0.
+> Confini ISTAT 2026 © Istituto Nazionale di Statistica, CC BY 4.0.
+> Elaborazione QGIS via plugin *Analisi DUSAF 7 — Comune Lombardo*
+> (codice AGPL-3.0).
+
+### English summary
+
+The plugin processes third-party datasets, each with its own license:
+DUSAF 7.0 and Lombardy administrative boundaries © Regione Lombardia
+(CC BY 4.0); optional ISTAT 2026 municipal boundaries © Istituto
+Nazionale di Statistica (CC BY 4.0). Attribution is required when
+redistributing the workflow outputs. The plugin's Python code is
+licensed under AGPL-3.0.
+
 ## Cache locale
 
 Tutta la cache vive nel profilo QGIS:

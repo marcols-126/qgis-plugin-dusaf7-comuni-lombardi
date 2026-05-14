@@ -256,8 +256,10 @@ class IstatSetupDialog(QDialog):
             present = components.get("present", []) if isinstance(components, dict) else []
             present_names = sorted(os.path.basename(p) for p in present)
             self._log_widget.appendPlainText(
-                f"[OK] Componenti shapefile trovati ({len(present_names)} file): "
-                + ", ".join(present_names)
+                "[OK] Componenti shapefile trovati ({} file): {}".format(
+                    len(present_names),
+                    ", ".join(present_names),
+                )
             )
 
             self._log_widget.appendPlainText(
@@ -272,7 +274,7 @@ class IstatSetupDialog(QDialog):
             )
 
             shp_path = entry.get("shapefile_path", "(percorso non disponibile)")
-            self._log_widget.appendPlainText(f"[OK] Cache ISTAT pronta.")
+            self._log_widget.appendPlainText("[OK] Cache ISTAT pronta.")
             self._log_widget.appendPlainText(f"     Shapefile: {shp_path}")
 
             self._cache_changed = True

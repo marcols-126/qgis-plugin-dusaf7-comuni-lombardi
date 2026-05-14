@@ -102,6 +102,7 @@ class _ClickablePathLog(QPlainTextEdit):
                 return token
         return None
 
+
 STATUS_OK_STYLE = "color:#006100; background-color:#eefbea; padding:4px; border:1px solid #3caa3c;"
 STATUS_INFO_STYLE = "color:#1a4170; background-color:#e8f1fb; padding:4px; border:1px solid #5c8fce;"
 STATUS_WARN_STYLE = "color:#7a4a00; background-color:#fff5e1; padding:4px; border:1px solid #e0a040;"
@@ -171,9 +172,9 @@ def _find_project_layer(name_candidates, required_fields):
         )[0].lower()
 
         name_match = any(
-            cand.lower() == layer_name
-            or cand.lower() == source_stem
-            or cand.lower() in layer_name
+            cand.lower() == layer_name or
+            cand.lower() == source_stem or
+            cand.lower() in layer_name
             for cand in name_candidates
         )
 
@@ -1017,10 +1018,6 @@ class DusafMainDialog(QDialog):
             "OUTPUT_DIR_OVERRIDE": custom_dir if output_mode == OUTPUT_MODE_CUSTOM else "",
         }
 
-        # Snapshot the project layer ids BEFORE the run so the optional
-        # cleanup at the end can only ever touch the layers we just added.
-        pre_run_layer_ids = set(QgsProject.instance().mapLayers().keys())
-
         try:
             mode_label = {
                 OUTPUT_MODE_MEMORY: "Solo memoria",
@@ -1107,20 +1104,3 @@ class DusafMainDialog(QDialog):
             QApplication.restoreOverrideCursor()
             self._update_run_state()
 
-    def _cleanup_newly_added_layers(self, pre_run_layer_ids):
-        """Remove only layers added DURING the current run.
-
-        We compare the project layer ids before and after the algorithm runs
-        and remove only those that appeared in between. This guarantees we
-        never touch user-loaded layers or outputs from a previous algorithm
-        run, even when they share names with the new outputs.
-        """
-        try:
-            project = QgsProject.instance()
-            current_ids = set(project.mapLayers().keys())
-            new_ids = [lid for lid in current_ids if lid not in pre_run_layer_ids]
-            for layer_id in new_ids:
-                project.removeMapLayer(layer_id)
-            return len(new_ids)
-        except Exception:
-            return 0

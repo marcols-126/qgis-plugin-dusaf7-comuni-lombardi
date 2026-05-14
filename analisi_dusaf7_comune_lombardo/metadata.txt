@@ -6,7 +6,7 @@
 name=Analisi DUSAF 7 Comune Lombardo
 qgisMinimumVersion=3.34
 description=Automated DUSAF 7 land-use analysis for Lombardy municipalities via Regione Lombardia REST services. QC-4 audit, GeoPackage + CSV export. (Plugin regionale italiano.)
-version=0.2.5
+version=0.2.6
 author=Marco Stefano La Sala
 email=214729081+marcols-126@users.noreply.github.com
 
@@ -15,19 +15,40 @@ about=English - QGIS plugin for automated land-use analysis in the municipalitie
     Workflow: Comune validation, geometry fix, EPSG:32632 reprojection, DUSAF clipping on the municipal perimeter, slivers handling, dissolve by land-use class, area calculation (m^2, hectares, percentages), and a QC-4 audit with area-conservation check.
     Output: multilayer GeoPackage with applied QML styles + CSV summary per class. A memory-only mode is available for quick analyses without writing files.
     Compatibility: QGIS 3.34 -> 4.99, Qt5 and Qt6.
+    Data attribution: DUSAF 7.0 and Ambiti Amministrativi (c) Regione Lombardia (CC BY 4.0); ISTAT 2026 boundaries (c) ISTAT (CC BY 4.0). Plugin code: AGPL-3.0.
     ---
     Italiano - Plugin QGIS per l'analisi automatica dell'uso del suolo nei Comuni lombardi, basato sul dataset DUSAF 7.0 di Regione Lombardia e sui confini amministrativi ufficiali.
     A differenza dei plugin tradizionali NON richiede il pre-caricamento manuale dei layer: i dati vengono scaricati al volo dai servizi REST ufficiali di Regione Lombardia (ArcGIS Server), con cache automatica nel profilo QGIS. Opzionalmente e' possibile attivare i confini ISTAT 2026 come fonte autoritativa.
     Workflow: validazione del Comune, fix geometrie, riproiezione EPSG:32632, clip DUSAF sul perimetro, gestione slivers, dissolve per classe, calcolo superfici (m^2, ettari, percentuali) e audit QC-4 con controllo conservazione delle aree.
     Output: GeoPackage multilayer con stili QML applicati + CSV riepilogativo per classe. Modalita memoria disponibile per analisi rapide senza scrivere file.
     Compatibilita: QGIS 3.34 -> 4.99, Qt5 e Qt6. Pensato per istruttorie urbanistiche e analisi PGT.
+    Attribuzione dati: DUSAF 7.0 e Ambiti Amministrativi (c) Regione Lombardia (CC BY 4.0); confini ISTAT 2026 (c) ISTAT (CC BY 4.0). Codice plugin: AGPL-3.0.
 
 tracker=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi/issues
 repository=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi
 
 hasProcessingProvider=yes
 
-changelog=0.2.5 (2026-05-17)
+changelog=0.2.6 (2026-05-17)
+        - Data attribution clarified: explicit CC BY 4.0 statement for
+          the third-party datasets the plugin consumes (DUSAF 7.0 and
+          Ambiti Amministrativi from Regione Lombardia Geoportale; ISTAT
+          2026 confines from Istituto Nazionale di Statistica). New
+          "Attribuzione dati / Data attribution" section in README.md with
+          bilingual licence statement and a suggested citation template.
+          stili/ATTRIBUZIONE_STILI.txt rewritten to spell out the CC BY
+          4.0 provenance of the symbology and the AGPL-3.0 of the code.
+          metadata.txt "about" extended with a Data attribution line in
+          both English and Italian.
+        - Runtime log now emits an [ATTR] line at workflow start so the
+          attribution is visible in every Processing run log
+          ("[ATTR] Dati: ... (c) Regione Lombardia (CC BY 4.0); ...").
+        - Close 14 Flake8 findings raised by the plugins.qgis.org Code
+          Quality scanner (W292/W293 trailing newline issues, W503 line
+          break before binary operator, F541 useless f-string, E305 blank
+          lines after function, F841 dead local pre_run_layer_ids). No
+          functional change to the workflow; tests still 97 green.
+    0.2.5 (2026-05-17)
         - Remove the remaining Plugin Builder dev-tool folders that
           plugins.qgis.org "Suspicious Files" scanner flagged:
           * help/ (Sphinx docs scaffolding, including help/make.bat and

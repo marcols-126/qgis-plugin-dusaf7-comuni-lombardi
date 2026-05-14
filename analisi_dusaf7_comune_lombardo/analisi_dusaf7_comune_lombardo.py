@@ -76,7 +76,7 @@ class AnalisiDusaf7ComuneLombardoPluginPlugin(object):
         self._dialog.show()
         self._dialog.raise_()
         self._dialog.activateWindow()
-    
+
     def initGui(self):
         self.initProcessing()
 

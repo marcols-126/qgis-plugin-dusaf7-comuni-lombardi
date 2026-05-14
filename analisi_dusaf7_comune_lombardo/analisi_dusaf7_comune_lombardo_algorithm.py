@@ -163,9 +163,9 @@ def _find_project_layer_by_name_and_fields(layer_name, required_fields=None, all
         layer_name_clean = layer_name_current.split("[")[0].strip().lower()
 
         name_match = (
-            layer_name_current.lower() == target
-            or layer_name_clean == target
-            or source_name == target
+            layer_name_current.lower() == target or
+            layer_name_clean == target or
+            source_name == target
         )
 
         if allow_contains:
@@ -244,9 +244,9 @@ def _find_comuni_project_layer():
             allow_contains=True,
         )
         if (
-            layer
-            and not _looks_like_output_layer(layer)
-            and _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES)
+            layer and
+            not _looks_like_output_layer(layer) and
+            _first_available_field(layer, MUNICIPALITY_FIELD_CANDIDATES)
         ):
             return layer
 
@@ -1223,6 +1223,12 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "======================================================")
         self._msg(feedback, "AVVIO - Analisi DUSAF 7 per Comune Lombardo")
         self._msg(feedback, "======================================================")
+        self._msg(
+            feedback,
+            "[ATTR] Dati: DUSAF 7.0 e Ambiti Amministrativi (c) Regione "
+            "Lombardia (CC BY 4.0); confini ISTAT 2026 (c) ISTAT (CC BY 4.0). "
+            "Plugin: AGPL-3.0.",
+        )
         self._msg(feedback, f"[OK] Comune richiesto: {comune_name}")
         self._msg(feedback, f"[OK] Layer Comuni: {comuni.name()}")
         self._msg(feedback, f"[OK] Cartella progetto QGIS: {project_dir}")
