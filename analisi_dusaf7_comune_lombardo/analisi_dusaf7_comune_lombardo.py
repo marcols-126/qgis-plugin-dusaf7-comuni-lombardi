@@ -100,6 +100,20 @@ class AnalisiDusaf7ComuneLombardoPluginPlugin(object):
         self.iface.addPluginToMenu("Analisi DUSAF 7", self.action)
 
     def unload(self):
+        # Release QGIS resources only. We deliberately do NOT clear our
+        # submodules from ``sys.modules`` here: doing so half-corrupts the
+        # import graph when QGIS calls ``classFactory()`` again on
+        # reload (the package parent gets purged but the .py module
+        # keeps an outdated ``__package__`` reference, causing
+        # "attempted relative import with no known parent package" the
+        # next time relative imports run).
+        #
+        # As a result, "Ricarica plugin" (Plugin Reloader) re-imports
+        # only the top-level module and reuses the cached submodules
+        # for ui/, compat, data_sources/, workflow/. Edits to those
+        # submodules require a full QGIS restart to take effect. This is
+        # a Plugin Reloader limitation for multi-module plugins, not a
+        # bug we can paper over reliably.
         if self._dialog is not None:
             try:
                 self._dialog.close()

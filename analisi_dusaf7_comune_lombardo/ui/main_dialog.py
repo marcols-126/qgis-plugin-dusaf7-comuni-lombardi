@@ -14,6 +14,8 @@ instantiates lazily when the user clicks the toolbar action.
 """
 
 import os
+import shutil
+import zipfile
 
 import processing
 
@@ -27,18 +29,23 @@ from qgis.PyQt.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
+    QSlider,
+    QSpinBox,
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QScrollArea,
     QSizePolicy,
     QSpacerItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from qgis.core import (
@@ -47,7 +54,21 @@ from qgis.core import (
     QgsVectorLayer,
 )
 
-from ..compat import runtime_summary
+from ..compat import (
+    CASE_INSENSITIVE,
+    COMPLETER_POPUP,
+    CURSOR_WAIT,
+    FEATURE_REQUEST_NO_GEOMETRY,
+    FONT_MONOSPACE,
+    FRAME_NO_FRAME,
+    MATCH_CONTAINS,
+    ORIENT_HORIZONTAL,
+    SIZE_POLICY_EXPANDING,
+    SIZE_POLICY_MINIMUM,
+    TEXT_FORMAT_RICH,
+    TEXTCURSOR_LINE_UNDER_CURSOR,
+    runtime_summary,
+)
 from ..data_sources import normalize_comune_display_name
 from ..workflow.data_resolver import (
     get_comuni_list_for_autocomplete,
@@ -63,6 +84,9 @@ SETTINGS_OUTPUT_MODE = f"{SETTINGS_PREFIX}/output_mode"          # "memory"|"pro
 SETTINGS_OUTPUT_DIR = f"{SETTINGS_PREFIX}/output_dir"            # last custom dir
 SETTINGS_SLIVER_M2 = f"{SETTINGS_PREFIX}/sliver_min_area_m2"
 SETTINGS_LOAD_INTO_PROJECT = f"{SETTINGS_PREFIX}/load_into_project"
+# Opacità (%) da applicare al layer "DUSAF7 <Comune> - clip QC" appena
+# uscito dal workflow. Range 0-100, default 100 (totalmente opaco).
+SETTINGS_CLIP_QC_OPACITY_PCT = f"{SETTINGS_PREFIX}/clip_qc_opacity_pct"
 
 OUTPUT_MODE_MEMORY = "memory"
 OUTPUT_MODE_PROJECT = "project"
@@ -79,7 +103,7 @@ class _ClickablePathLog(QPlainTextEdit):
 
     def mouseDoubleClickEvent(self, event):
         cursor = self.cursorForPosition(event.pos())
-        cursor.select(QTextCursor.LineUnderCursor)
+        cursor.select(TEXTCURSOR_LINE_UNDER_CURSOR)
         line = cursor.selectedText()
         target = self._extract_path(line)
         if target:
@@ -279,7 +303,12 @@ class DusafMainDialog(QDialog):
         self._settings = QSettings()
 
         self.setWindowTitle("Analisi DUSAF 7 - Comuni Lombardia")
-        self.setMinimumSize(720, 640)
+        # Keep the minimum small enough that the dialog fits on low-resolution
+        # screens (e.g. 1366x768 with Windows scaling, or 1280x720 laptops).
+        # The content is wrapped in a QScrollArea so nothing becomes unreachable
+        # when the window is shrunk below the preferred size.
+        self.setMinimumSize(480, 360)
+        self.resize(760, 680)
 
         self._build_ui()
         self._load_settings()
@@ -287,6 +316,21 @@ class DusafMainDialog(QDialog):
         self._refresh_output_mode_availability()
         self._populate_comune_autocomplete()
         self._update_run_state()
+
+        # Ascolto dei cambiamenti del progetto: se l'utente carica o
+        # rimuove un layer DUSAF/Comuni mentre il dialog e' aperto,
+        # vogliamo che lo "stato dati" (badge verde/azzurro + banner
+        # rosso consigliato) si aggiorni automaticamente, senza dover
+        # chiudere e riaprire il dialog.
+        try:
+            project = QgsProject.instance()
+            project.layersAdded.connect(self._on_project_layers_changed)
+            project.layersRemoved.connect(self._on_project_layers_changed)
+        except Exception:
+            # Su QGIS molto vecchi o configurazioni anomale i segnali
+            # potrebbero non essere disponibili; non e' fatale per il
+            # plugin, solo niente refresh automatico in quei casi.
+            pass
 
     def showEvent(self, event):
         """Refresh project-aware state every time the dialog is shown.
@@ -302,36 +346,108 @@ class DusafMainDialog(QDialog):
         except Exception:
             pass
 
+    def _on_project_layers_changed(self, *_args):
+        """Slot collegato a QgsProject.layersAdded/layersRemoved.
+
+        Quando un layer entra o esce dal progetto, lo stato dei badge
+        e del banner "Consigliato: carica DUSAF7" puo' diventare
+        obsoleto. Un refresh leggero risolve. Gli argomenti del segnale
+        (lista di layer / lista di id) non ci interessano: ricalcoliamo
+        sempre da zero leggendo lo stato attuale del progetto.
+        """
+        try:
+            self._refresh_data_status()
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        """Stacca i segnali del progetto quando il dialog si chiude.
+
+        Evita che callback su un widget orfano vengano invocate dopo
+        che l'utente ha chiuso il dialog (improbabile ma pulito).
+        """
+        try:
+            project = QgsProject.instance()
+            project.layersAdded.disconnect(self._on_project_layers_changed)
+            project.layersRemoved.disconnect(self._on_project_layers_changed)
+        except Exception:
+            pass
+        super().closeEvent(event)
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        # Outer chrome: a single QScrollArea so the dialog stays usable on
+        # low-resolution screens. All widgets that used to live directly on
+        # ``self`` now live inside ``content`` and ``root`` builds the same
+        # layout as before.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(FRAME_NO_FRAME)
+        outer.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        root = QVBoxLayout(content)
         root.setSpacing(10)
 
         header = QLabel("<h2 style='margin:0;'>Analisi uso del suolo DUSAF 7</h2>")
-        header.setTextFormat(Qt.RichText)
+        header.setTextFormat(TEXT_FORMAT_RICH)
         root.addWidget(header)
 
         subtitle = QLabel(
-            "Calcolo automatico delle superfici per classe d'uso del suolo, "
-            "ritagliate sul perimetro di un Comune lombardo. I dati vengono "
-            "scaricati al volo dai servizi REST di Regione Lombardia se non "
-            "sono già caricati nel progetto."
+            "<b>Procedura in 3 passi</b>:<br>"
+            "&nbsp;&nbsp;<b>1)</b> verifica gli <b>INPUT</b> qui sotto "
+            "(consigliato: DUSAF7 come layer di progetto)<br>"
+            "&nbsp;&nbsp;<b>2)</b> digita il <b>Comune</b> da analizzare<br>"
+            "&nbsp;&nbsp;<b>3)</b> clicca <b>Esegui</b><br>"
+            "<i>Il plugin calcola le superfici per classe d'uso del suolo "
+            "ritagliate sul perimetro del Comune e produce 4 layer + 1 CSV.</i>"
         )
+        subtitle.setTextFormat(TEXT_FORMAT_RICH)
         subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color:#555;")
+        # No hardcoded colour: let the theme decide so the subtitle stays
+        # legible on both light (3.x) and dark (4.0) QGIS themes.
         root.addWidget(subtitle)
 
-        # === Stato dati ===
-        status_box = QGroupBox("Stato dati")
-        status_layout = QVBoxLayout(status_box)
+        # =================================================================
+        # Stato dati: due sottosezioni peer-level con scopo distinto.
+        #
+        # 1) Confini comunali: chi è il "ritaglio" geografico del Comune
+        #    su cui ritagliamo il DUSAF. Fonte: cache ISTAT (autoritativa)
+        #    o servizio REST RL al volo.
+        # 2) DUSAF 7.0: i DATI analizzati - uso del suolo per classe. Fonte:
+        #    layer di progetto (consigliato, offline) o servizio REST RL
+        #    limitato al Comune.
+        # =================================================================
+
+        # ---- Sezione 1: Confini comunali (ISTAT) ----
+        comuni_box = QGroupBox(
+            "INPUT - Confini comunali (ISTAT, perimetro del Comune)"
+        )
+        comuni_layout = QVBoxLayout(comuni_box)
+
+        comuni_purpose = QLabel(
+            "Definiscono il <b>perimetro del Comune</b> usato per ritagliare "
+            "i dati DUSAF. Il plugin scarica dal servizio REST RL il solo "
+            "Comune selezionato, oppure usa la cache ISTAT 2026 ufficiale "
+            "se configurata."
+        )
+        comuni_purpose.setWordWrap(True)
+        comuni_purpose.setTextFormat(TEXT_FORMAT_RICH)
+        comuni_layout.addWidget(comuni_purpose)
 
         self._comuni_status_label = QLabel("...")
         self._comuni_status_label.setWordWrap(True)
-        self._comuni_status_label.setTextFormat(Qt.RichText)
-        status_layout.addWidget(self._comuni_status_label)
+        self._comuni_status_label.setTextFormat(TEXT_FORMAT_RICH)
+        comuni_layout.addWidget(self._comuni_status_label)
 
         comuni_actions = QHBoxLayout()
         self._refresh_comuni_btn = QPushButton("Aggiorna cache lista Comuni")
@@ -351,17 +467,111 @@ class DusafMainDialog(QDialog):
         self._istat_btn.clicked.connect(self._on_istat_setup_clicked)
         comuni_actions.addWidget(self._istat_btn)
         comuni_actions.addStretch(1)
-        status_layout.addLayout(comuni_actions)
+        comuni_layout.addLayout(comuni_actions)
+
+        root.addWidget(comuni_box)
+
+        # ---- Sezione 2: DUSAF 7.0 (uso del suolo) ----
+        dusaf_box = QGroupBox(
+            "INPUT - Uso del suolo (DUSAF 7.0, dati analizzati)"
+        )
+        dusaf_layout = QVBoxLayout(dusaf_box)
+
+        dusaf_purpose = QLabel(
+            "Dataset <b>analizzato dal flusso di lavoro</b>: contiene le superfici "
+            "classificate per uso del suolo (residenziale, agricolo, "
+            "boschivo, infrastrutture, ecc.). Il plugin lo ritaglia sul "
+            "Comune scelto e calcola le aree per ogni classe DUSAF."
+        )
+        dusaf_purpose.setWordWrap(True)
+        dusaf_purpose.setTextFormat(TEXT_FORMAT_RICH)
+        dusaf_layout.addWidget(dusaf_purpose)
+
+        # Consiglio prominente: il path "layer di progetto" e' di gran
+        # lunga il piu' robusto. Il REST e' un fallback per uso casuale.
+        # IMPORTANTE: memorizzare il widget come attributo di istanza
+        # (``self._dusaf_recommend``) e non come variabile locale, in
+        # modo che ``_refresh_data_status`` possa chiamare setVisible
+        # quando lo stato del progetto cambia.
+        self._dusaf_recommend = QLabel(
+            "<b>⚠ Consigliato</b>: caricare <b>DUSAF7 come layer di "
+            "progetto</b> (offline, veloce, robusto). Usa il pulsante "
+            "<b>1</b> per scaricare lo ZIP dal Geoportale RL la prima "
+            "volta, oppure il pulsante <b>2</b> per caricare uno ZIP o "
+            "uno shapefile <b>già presente nel tuo PC</b>.<br>"
+            "<i>Alternativa</i>: se non carichi DUSAF7 il plugin userà "
+            "il servizio REST live di Regione Lombardia, soggetto a "
+            "interruzioni frequenti ('Failed to execute query..')."
+        )
+        self._dusaf_recommend.setWordWrap(True)
+        self._dusaf_recommend.setTextFormat(TEXT_FORMAT_RICH)
+        # Stile box-evidenziato in rosso/arancio: leggibile su entrambi
+        # i temi (chiaro e scuro) perche' specifica COLORE testo +
+        # SFONDO + BORDO, niente di lasciato al tema.
+        self._dusaf_recommend.setStyleSheet(
+            "QLabel { color:#7a0000; background-color:#fdecec; "
+            "padding:6px; border:1px solid #cc3030; font-size:90%; }"
+        )
+        dusaf_layout.addWidget(self._dusaf_recommend)
 
         self._dusaf_status_label = QLabel("...")
         self._dusaf_status_label.setWordWrap(True)
-        self._dusaf_status_label.setTextFormat(Qt.RichText)
-        status_layout.addWidget(self._dusaf_status_label)
+        self._dusaf_status_label.setTextFormat(TEXT_FORMAT_RICH)
+        dusaf_layout.addWidget(self._dusaf_status_label)
 
-        root.addWidget(status_box)
+        # Mini-guida testuale a fianco dei bottoni: i tre passi della
+        # procedura offline. Lasciamo i bottoni a fianco perche' il
+        # workflow e' veramente solo 1) scarica, 2) carica, 3) Esegui.
+        dusaf_guide = QLabel(
+            "<i>Procedura consigliata (offline, indipendente da REST RL)</i>:<br>"
+            "&nbsp;&nbsp;1. Scarica lo ZIP DUSAF 7.0 dal Geoportale (~321 MB)<br>"
+            "&nbsp;&nbsp;2. Carica lo ZIP nel progetto con il pulsante qui sotto: "
+            "il plugin estrae <code>DUSAF7.shp</code> automaticamente in una "
+            "cartella <code>_estratto/</code> accanto allo ZIP"
+        )
+        dusaf_guide.setWordWrap(True)
+        dusaf_guide.setTextFormat(TEXT_FORMAT_RICH)
+        dusaf_guide.setStyleSheet(
+            "QLabel { font-size:90%; padding:4px 0 0 0; }"
+        )
+        dusaf_layout.addWidget(dusaf_guide)
+
+        dusaf_actions = QHBoxLayout()
+        self._open_geoportale_btn = QPushButton(
+            "1. Apri Geoportale RL"
+        )
+        self._open_geoportale_btn.setToolTip(
+            "Apre nel browser la pagina ufficiale del Geoportale Regione "
+            "Lombardia dove è scaricabile il pacchetto DUSAF 7.0 (~321 MB, "
+            "Shapefile, CC BY 4.0)."
+        )
+        self._open_geoportale_btn.clicked.connect(self._on_open_geoportale_clicked)
+        dusaf_actions.addWidget(self._open_geoportale_btn)
+
+        self._load_dusaf_btn = QPushButton(
+            "2. Carica DUSAF (ZIP o SHP) nel progetto..."
+        )
+        self._load_dusaf_btn.setToolTip(
+            "Apre un selettore di file per caricare il DUSAF 7.0 nel "
+            "progetto QGIS.\n\n"
+            "Puoi selezionare direttamente:\n"
+            "  - lo ZIP scaricato dal Geoportale RL (il plugin estrae "
+            "DUSAF7.shp + sidecar in una sottocartella '<nome>_estratto/' "
+            "accanto allo ZIP)\n"
+            "  - oppure DUSAF7.shp se l'hai già estratto manualmente\n\n"
+            "In entrambi i casi il plugin riconosce il layer caricato e "
+            "lo usa al posto del servizio REST."
+        )
+        self._load_dusaf_btn.clicked.connect(self._on_load_dusaf_clicked)
+        dusaf_actions.addWidget(self._load_dusaf_btn)
+
+        dusaf_actions.addStretch(1)
+        dusaf_layout.addLayout(dusaf_actions)
+
+        root.addWidget(dusaf_box)
 
         # === Selezione Comune ===
-        comune_box = QGroupBox("Comune da analizzare")
+        comune_box = QGroupBox("PROCESSING - Comune da analizzare")
         comune_layout = QVBoxLayout(comune_box)
 
         self._comune_input = QLineEdit()
@@ -370,22 +580,59 @@ class DusafMainDialog(QDialog):
         )
         self._comune_completer_model = QStringListModel([], self)
         self._comune_completer = QCompleter(self._comune_completer_model, self._comune_input)
-        self._comune_completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self._comune_completer.setFilterMode(Qt.MatchContains)
-        self._comune_completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._comune_completer.setCaseSensitivity(CASE_INSENSITIVE)
+        self._comune_completer.setFilterMode(MATCH_CONTAINS)
+        self._comune_completer.setCompletionMode(COMPLETER_POPUP)
         self._comune_input.setCompleter(self._comune_completer)
         self._comune_input.textChanged.connect(self._on_comune_text_changed)
         comune_layout.addWidget(self._comune_input)
 
         self._comune_validation_label = QLabel("...")
         self._comune_validation_label.setWordWrap(True)
-        self._comune_validation_label.setTextFormat(Qt.RichText)
+        self._comune_validation_label.setTextFormat(TEXT_FORMAT_RICH)
         comune_layout.addWidget(self._comune_validation_label)
+
+        # Slider trasparenza del layer "DUSAF7 <Comune> - clip QC".
+        # Permette di sovrapporre il DUSAF a un'ortofoto/basemap
+        # sottostante senza dover passare dal pannello Stile Layer di
+        # QGIS. Il valore viene applicato immediatamente quando il
+        # layer clip QC e' gia' nel progetto (ad esempio dopo una
+        # precedente esecuzione) ed e' anche ricordato per la prossima
+        # esecuzione.
+        opacity_row = QHBoxLayout()
+        opacity_label = QLabel("Trasparenza layer <i>clip QC</i>:")
+        opacity_label.setTextFormat(TEXT_FORMAT_RICH)
+        opacity_row.addWidget(opacity_label)
+
+        self._opacity_slider = QSlider(ORIENT_HORIZONTAL)
+        self._opacity_slider.setRange(0, 100)
+        self._opacity_slider.setValue(100)
+        self._opacity_slider.setToolTip(
+            "Opacita' del layer 'DUSAF7 <Comune> - clip QC' (0% = "
+            "totalmente trasparente, 100% = totalmente opaco). Utile "
+            "per sovrapporre il DUSAF a un'ortofoto o a un tassello di "
+            "sfondo."
+        )
+        opacity_row.addWidget(self._opacity_slider, stretch=1)
+
+        self._opacity_spin = QSpinBox()
+        self._opacity_spin.setRange(0, 100)
+        self._opacity_spin.setValue(100)
+        self._opacity_spin.setSuffix(" %")
+        self._opacity_spin.setMinimumWidth(70)
+        opacity_row.addWidget(self._opacity_spin)
+
+        # Sincronizzazione bidirezionale slider <-> spinbox + apply
+        # immediato sul layer del progetto se gia' presente.
+        self._opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self._opacity_spin.valueChanged.connect(self._on_opacity_changed)
+
+        comune_layout.addLayout(opacity_row)
 
         root.addWidget(comune_box)
 
         # === Parametri ===
-        params_box = QGroupBox("Parametri")
+        params_box = QGroupBox("PROCESSING - Parametri")
         params_layout = QFormLayout(params_box)
 
         self._sliver_spin = QDoubleSpinBox()
@@ -399,47 +646,37 @@ class DusafMainDialog(QDialog):
         )
         params_layout.addRow("Area minima slivers:", self._sliver_spin)
 
+        sliver_hint = QLabel(
+            "<i>Default 1.0 m² è una soglia conservativa per intercettare "
+            "i micro-frammenti generati dal clip (rumore numerico, non "
+            "perdita di dato). Aumenta a 5-10 m² se vuoi un layer slivers "
+            "più "
+            "ricco per ispezione manuale; 0 disattiva il flag.</i>"
+        )
+        sliver_hint.setWordWrap(True)
+        sliver_hint.setTextFormat(TEXT_FORMAT_RICH)
+        sliver_hint.setStyleSheet("QLabel { font-size:90%; }")
+        params_layout.addRow("", sliver_hint)
+
         root.addWidget(params_box)
 
-        # === Cosa ottieni: spiegazione output ===
-        info_box = QGroupBox("Cosa ottieni dopo l'esecuzione")
-        info_layout = QVBoxLayout(info_box)
-
+        # === Cosa ottieni: riga compatta con link al README ===
         info_label = QLabel(
-            "<style>li { margin-bottom:4px; }</style>"
-            "<p style='margin:0 0 6px 0;'>Il workflow produce <b>4 layer</b> "
-            "(più 1 CSV se modalità file). Stili QML applicati automaticamente.</p>"
-            "<ul style='margin:0; padding-left:18px;'>"
-            "<li><b>DUSAF7 &lt;Comune&gt; - superfici ha %</b>: una feature per "
-            "<i>classe DUSAF</i> con campi <code>area_m2</code>, <code>area_ha</code>, "
-            "<code>pct_dusaf</code> (% sul totale DUSAF clippato), "
-            "<code>pct_comune</code> (% sul perimetro Comune). "
-            "<b>Layer principale per statistiche.</b></li>"
-            "<li><b>DUSAF7 &lt;Comune&gt; - clip QC</b>: tutte le feature DUSAF "
-            "ritagliate sul Comune, una per poligono originale. "
-            "Categorizzato per codice classe. Utile per ispezione visiva e "
-            "controllo qualità.</li>"
-            "<li><b>Confine &lt;Comune&gt; fix</b>: il perimetro del Comune "
-            "selezionato (1 feature), per riferimento e overlay.</li>"
-            "<li><b>QC slivers DUSAF7 &lt;Comune&gt;</b>: frammenti residui di "
-            "clip con area &le; soglia (presente solo se ne esistono).</li>"
-            "</ul>"
-            "<p style='margin:6px 0 0 0;'>In modalità file: <b>CSV</b> "
-            "riepilogo con codice DUSAF, descrizione, area m²/ha, percentuali "
-            "(separatore <code>;</code>, encoding UTF-8 BOM, apribile con "
-            "Excel/LibreOffice).</p>"
+            "<b>Output</b>: 4 layer (superfici per classe, clip QC, confine, "
+            "slivers) + 1 CSV in modalità file. Stili QML applicati. "
+            f"<a href='{README_URL}'>Dettagli nel README →</a>"
         )
-        info_label.setTextFormat(Qt.RichText)
+        info_label.setTextFormat(TEXT_FORMAT_RICH)
         info_label.setWordWrap(True)
+        info_label.setOpenExternalLinks(True)
         info_label.setStyleSheet(
-            "QLabel { background-color:#f6f8fa; padding:6px; "
+            "QLabel { color:#1a1a1a; background-color:#f6f8fa; padding:6px; "
             "border:1px solid #d0d7de; font-size:90%; }"
         )
-        info_layout.addWidget(info_label)
-        root.addWidget(info_box)
+        root.addWidget(info_label)
 
         # === Output: memory / project folder / custom folder ===
-        output_box = QGroupBox("Output")
+        output_box = QGroupBox("OUTPUT - Modalità di salvataggio")
         output_layout = QVBoxLayout(output_box)
 
         self._output_mode_group = QButtonGroup(self)
@@ -487,20 +724,21 @@ class DusafMainDialog(QDialog):
 
         self._output_mode_hint = QLabel("")
         self._output_mode_hint.setWordWrap(True)
-        self._output_mode_hint.setStyleSheet("color:#7a4a00; font-size:90%;")
+        # Theme-safe orange that stays legible on both light and dark themes.
+        self._output_mode_hint.setStyleSheet("color:#cc7700; font-size:90%;")
         output_layout.addWidget(self._output_mode_hint)
 
         root.addWidget(output_box)
 
         # === Esecuzione: log + progress ===
-        run_box = QGroupBox("Esecuzione")
+        run_box = QGroupBox("ESECUZIONE - Log e progresso")
         run_layout = QVBoxLayout(run_box)
 
         self._log_widget = _ClickablePathLog()
         self._log_widget.setReadOnly(True)
         self._log_widget.setMaximumBlockCount(2000)
         log_font = QFont("Consolas")
-        log_font.setStyleHint(QFont.Monospace)
+        log_font.setStyleHint(FONT_MONOSPACE)
         log_font.setPointSize(9)
         self._log_widget.setFont(log_font)
         self._log_widget.setPlaceholderText(
@@ -550,15 +788,23 @@ class DusafMainDialog(QDialog):
         buttons.addWidget(self._open_folder_btn)
 
         buttons.addSpacerItem(
-            QSpacerItem(40, 1, QSizePolicy.Expanding, QSizePolicy.Minimum)
+            QSpacerItem(40, 1, SIZE_POLICY_EXPANDING, SIZE_POLICY_MINIMUM)
         )
 
         self._close_btn = QPushButton("Chiudi")
         self._close_btn.clicked.connect(self.reject)
         buttons.addWidget(self._close_btn)
 
-        self._run_btn = QPushButton("Esegui")
+        # "Esegui" è il bottone protagonista: enfatizzato visivamente
+        # con bold + larghezza minima così l'utente lo identifica subito
+        # come l'azione finale del flusso. setDefault attiva anche
+        # l'invio da tastiera quando il dialog ha il focus.
+        self._run_btn = QPushButton("▶ Esegui analisi")
         self._run_btn.setDefault(True)
+        self._run_btn.setMinimumWidth(160)
+        self._run_btn.setStyleSheet(
+            "QPushButton { font-weight:bold; padding:6px 14px; }"
+        )
         self._run_btn.clicked.connect(self._on_run_clicked)
         buttons.addWidget(self._run_btn)
 
@@ -578,45 +824,55 @@ class DusafMainDialog(QDialog):
         if comuni_layer is not None:
             self._set_label(
                 self._comuni_status_label,
-                "<b>Confini comunali</b>: layer di progetto "
-                f"<i>{comuni_layer.name()}</i>",
+                "<b>Fonte attiva</b>: layer di progetto "
+                f"<i>{comuni_layer.name()}</i> (offline).",
                 STATUS_OK_STYLE,
             )
         elif get_istat_cached_shapefile_path() is not None:
             self._set_label(
                 self._comuni_status_label,
-                "<b>Confini comunali</b>: cache ISTAT 2026 (fonte ufficiale). "
-                "Pre-configurata via setup ISTAT.",
+                "<b>Fonte attiva</b>: cache ISTAT 2026 (configurata). "
+                "Fonte autoritativa, offline, indipendente dal REST RL.",
                 STATUS_OK_STYLE,
             )
         else:
             self._set_label(
                 self._comuni_status_label,
-                "<b>Confini comunali</b>: nessun layer nel progetto. "
-                "Verrà scaricato il singolo Comune selezionato dal servizio "
-                "REST Regione Lombardia (~10 KB per Comune). "
-                "Lista per autocomplete cacheata in profilo QGIS (TTL 30gg).",
+                "<b>Fonte attiva</b>: servizio REST Regione Lombardia "
+                "(scarica al volo il singolo Comune, ~10 KB). Lista "
+                "autocomplete cacheata in profilo QGIS (TTL 30gg).",
                 STATUS_INFO_STYLE,
             )
 
         dusaf_layer = _find_project_layer(
             self.DUSAF_LAYER_CANDIDATES, self.DUSAF_REQUIRED_FIELDS
         )
+
         if dusaf_layer is not None:
             self._set_label(
                 self._dusaf_status_label,
-                "<b>DUSAF 7</b>: layer di progetto "
-                f"<i>{dusaf_layer.name()}</i> (precisione massima LIV5)",
+                "<b>Fonte attiva</b>: layer di progetto "
+                f"<i>{dusaf_layer.name()}</i> (offline, veloce).",
                 STATUS_OK_STYLE,
             )
+            # DUSAF e' nel progetto: l'utente ha gia' fatto la scelta
+            # consigliata, il banner di richiamo diventa rumore visivo
+            # inutile. Lo nascondiamo per tenere l'interfaccia pulita.
+            if hasattr(self, "_dusaf_recommend"):
+                self._dusaf_recommend.setVisible(False)
         else:
             self._set_label(
                 self._dusaf_status_label,
-                "<b>DUSAF 7</b>: nessun layer nel progetto. "
-                "Verrà scaricato dal servizio REST Regione Lombardia "
-                "limitato al bounding box del Comune selezionato.",
+                "<b>Fonte attiva</b>: servizio REST Regione Lombardia "
+                "(online, limitato al Comune). "
+                "<i>Per lavorare offline segui la procedura qui sotto.</i>",
                 STATUS_INFO_STYLE,
             )
+            # Nessun DUSAF nel progetto: rendiamo il banner di consiglio
+            # visibile in modo che l'utente sappia perche' il workflow
+            # cadrebbe sul REST e come evitarlo.
+            if hasattr(self, "_dusaf_recommend"):
+                self._dusaf_recommend.setVisible(True)
 
     @staticmethod
     def _set_label(label, html, style):
@@ -630,6 +886,7 @@ class DusafMainDialog(QDialog):
     def _populate_comune_autocomplete(self, force_refresh=False):
         """Build the autocomplete list either from a project Comuni layer or
         from the cached/REST RL list."""
+        had_error = False
         try:
             comuni_layer = _find_project_layer(
                 self.COMUNI_LAYER_CANDIDATES, self.COMUNI_REQUIRED_FIELDS
@@ -639,17 +896,34 @@ class DusafMainDialog(QDialog):
             else:
                 self._populate_from_rest(force_refresh=force_refresh)
         except Exception as exc:
+            had_error = True
             self._valid_names = []
             self._valid_name_by_key = {}
             self._comuni_metadata_by_key = {}
             self._comune_completer_model.setStringList([])
             self._set_label(
                 self._comune_validation_label,
-                f"<b>Errore caricamento Comuni</b>: {exc}",
+                "<b>Errore caricamento lista Comuni</b>: " + str(exc)
+                + "<br><i>Il servizio Regione Lombardia potrebbe essere "
+                "temporaneamente non disponibile. Riprova tra qualche "
+                "minuto, oppure configura la cache ISTAT ufficiale.</i>",
                 STATUS_ERROR_STYLE,
             )
+            try:
+                self._log_widget.appendPlainText(
+                    "[ERROR] Refresh lista Comuni fallito: {}".format(exc)
+                )
+            except Exception:
+                pass
 
-        self._on_comune_text_changed(self._comune_input.text())
+        # Only recompute the validation label from the input text if the
+        # refresh succeeded; otherwise the explicit error message we set
+        # above would be immediately overwritten by the generic "lista non
+        # disponibile" placeholder.
+        if not had_error:
+            self._on_comune_text_changed(self._comune_input.text())
+        else:
+            self._update_run_state(False)
 
     def _populate_from_project_layer(self, layer):
         from ..analisi_dusaf7_comune_lombardo_algorithm import (
@@ -677,7 +951,7 @@ class DusafMainDialog(QDialog):
             attrs.append(region_name_field)
 
         request = QgsFeatureRequest()
-        request.setFlags(QgsFeatureRequest.NoGeometry)
+        request.setFlags(FEATURE_REQUEST_NO_GEOMETRY)
         request.setSubsetOfAttributes(attrs, layer.fields())
 
         names = []
@@ -719,7 +993,7 @@ class DusafMainDialog(QDialog):
         self._comune_completer_model.setStringList(names_sorted)
 
     def _populate_from_rest(self, force_refresh=False):
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(CURSOR_WAIT)
         try:
             comuni, source = get_comuni_list_for_autocomplete(force_refresh=force_refresh)
         finally:
@@ -930,12 +1204,30 @@ class DusafMainDialog(QDialog):
         except (TypeError, ValueError):
             pass
 
+        # Opacita' del layer clip QC (default 100% = totalmente opaco).
+        try:
+            opacity = int(self._settings.value(
+                SETTINGS_CLIP_QC_OPACITY_PCT, 100, type=int
+            ))
+        except (TypeError, ValueError):
+            opacity = 100
+        opacity = max(0, min(100, opacity))
+        for widget in (self._opacity_slider, self._opacity_spin):
+            widget.blockSignals(True)
+            try:
+                widget.setValue(opacity)
+            finally:
+                widget.blockSignals(False)
+
         self._refresh_output_mode_availability()
 
     def _save_settings(self):
         self._settings.setValue(SETTINGS_OUTPUT_MODE, self._selected_output_mode())
         self._settings.setValue(SETTINGS_OUTPUT_DIR, self._custom_dir_edit.text().strip())
         self._settings.setValue(SETTINGS_SLIVER_M2, float(self._sliver_spin.value()))
+        self._settings.setValue(
+            SETTINGS_CLIP_QC_OPACITY_PCT, int(self._opacity_slider.value())
+        )
 
     # ------------------------------------------------------------------
     # Help / Open folder / Enter / log path clicks
@@ -956,12 +1248,214 @@ class DusafMainDialog(QDialog):
                 "in modalità file (su disco).",
             )
 
+    def _on_opacity_changed(self, value):
+        """Tiene allineati slider e spinbox, applica al layer clip QC.
+
+        Se il layer di output "DUSAF7 <Comune> - clip QC" e' gia'
+        presente nel progetto (es. da una run precedente), l'opacita'
+        viene applicata immediatamente. Se non c'e' ancora, il valore
+        resta memorizzato e verra' applicato dopo la prossima
+        esecuzione del workflow (vedi
+        ``_apply_clip_qc_opacity_to_project_layers``).
+
+        Il valore e' persistito in QSettings, quindi sopravvive alla
+        chiusura del dialog/QGIS.
+        """
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return
+        value = max(0, min(100, value))
+
+        # Allinea slider <-> spinbox bloccando temporaneamente i signal
+        # per evitare un loop infinito di valueChanged.
+        for widget in (self._opacity_slider, self._opacity_spin):
+            if widget.value() != value:
+                widget.blockSignals(True)
+                try:
+                    widget.setValue(value)
+                finally:
+                    widget.blockSignals(False)
+
+        self._settings.setValue(SETTINGS_CLIP_QC_OPACITY_PCT, value)
+        self._apply_clip_qc_opacity_to_project_layers(value)
+
+    def _apply_clip_qc_opacity_to_project_layers(self, opacity_pct):
+        """Applica l'opacita' (in percentuale 0-100) a tutti i layer
+        di progetto che assomigliano a 'DUSAF7 <Comune> - clip QC'.
+
+        Cerchiamo per prefisso/suffisso anziche' nome esatto: cosi'
+        gestiamo il caso di rerun su Comuni diversi (vecchio layer
+        ancora in progetto) e il caso di doppia esecuzione (QGIS
+        appende '(1)', '(2)', ...).
+        """
+        try:
+            opacity_pct = int(opacity_pct)
+        except (TypeError, ValueError):
+            return
+        opacity_value = max(0.0, min(1.0, opacity_pct / 100.0))
+
+        project = QgsProject.instance()
+        any_touched = False
+        for layer in project.mapLayers().values():
+            name = getattr(layer, "name", lambda: "")()
+            if not name:
+                continue
+            # Riconosce 'DUSAF7 <Comune> - clip QC' indipendentemente
+            # dal nome del Comune (e' la firma stabile degli output).
+            if name.startswith("DUSAF7 ") and "- clip QC" in name:
+                try:
+                    layer.setOpacity(opacity_value)
+                    layer.triggerRepaint()
+                    any_touched = True
+                except Exception:
+                    pass
+
+        if any_touched:
+            try:
+                # Rinfresca anche il canvas se l'iface e' disponibile,
+                # in modo che il cambio sia visibile senza pan/zoom.
+                if self.iface is not None and hasattr(self.iface, "mapCanvas"):
+                    canvas = self.iface.mapCanvas()
+                    if canvas is not None:
+                        canvas.refresh()
+            except Exception:
+                pass
+
+    def _zoom_canvas_to_processed_comune(self, comune_name):
+        """Centra la mappa sull'estensione del Comune appena processato.
+
+        Cerca nei layer di progetto quello chiamato ``Confine <Comune>
+        fix`` (uno degli output del workflow) e imposta l'extent del
+        canvas sul suo bounding box, con un piccolo margine perche'
+        l'utente veda anche il contorno del Comune e qualche dettaglio
+        oltre il confine. Se per qualche motivo il layer non si trova
+        (caso teorico, non dovrebbe mai succedere su un run terminato
+        con successo) l'operazione e' silenziosa: lo zoom e' una
+        comodita', non un errore se manca.
+        """
+        if self.iface is None:
+            return
+
+        canvas = None
+        try:
+            canvas = self.iface.mapCanvas()
+        except Exception:
+            return
+        if canvas is None:
+            return
+
+        # Il workflow crea sempre un layer 'Confine <Comune> fix'. Usiamo
+        # Il layer generato dal flusso e' "Confine <NomeComune> fix",
+        # ma <NomeComune> e' la versione canonica restituita dal
+        # servizio REST (spesso UPPERCASE, es. "CREMONA") mentre nel
+        # dialog l'utente lo digita in title case (es. "Cremona"). Per
+        # evitare il mismatch facciamo un match case-insensitive sul
+        # nome del Comune *dentro* il pattern "Confine ... fix". Se la
+        # stessa sessione produce piu' "Confine X fix" (es. l'utente
+        # processa Zibido, poi Varese, poi Cremona) prendiamo quello
+        # giusto in base al nome, non il primo trovato (bug della
+        # 0.3.10 che zoommava sempre sul primo Comune processato).
+        target_key = comune_name.casefold().strip()
+        project = QgsProject.instance()
+        prefix_lower = "confine "
+        suffix_lower = " fix"
+
+        layers = []
+        for candidate in project.mapLayers().values():
+            name = getattr(candidate, "name", lambda: "")() or ""
+            name_lower = name.lower()
+            if not (
+                name_lower.startswith(prefix_lower)
+                and name_lower.endswith(suffix_lower)
+            ):
+                continue
+            middle = name[len(prefix_lower):-len(suffix_lower)]
+            if middle.casefold().strip() == target_key:
+                layers.append(candidate)
+
+        if not layers:
+            # Nessun match esatto: non azzardiamo lo zoom su un layer a
+            # caso (era la causa del bug). Meglio non zoommare che
+            # zoommare sul Comune sbagliato.
+            return
+
+        # Se ci sono piu' match (l'utente ha rieseguito sullo stesso
+        # Comune e QGIS ha aggiunto "(1)"/"(2)" al nome), prendiamo
+        # l'ultimo aggiunto: e' deterministicamente quello dell'ultima
+        # esecuzione del flusso.
+        layer = layers[-1]
+        if not getattr(layer, "isValid", lambda: False)():
+            return
+
+        try:
+            extent = layer.extent()
+        except Exception:
+            return
+        if extent is None or extent.isEmpty():
+            return
+
+        # Trasforma l'extent dal CRS del layer (EPSG:32632) al CRS del
+        # canvas (di solito EPSG:3857 OpenStreetMap o quello del
+        # progetto utente). Senza trasformazione il zoom finirebbe in
+        # un punto sbagliato del mondo.
+        try:
+            from qgis.core import (
+                QgsCoordinateTransform,
+                QgsProject as _QgsProject,
+            )
+
+            layer_crs = layer.crs()
+            canvas_crs = canvas.mapSettings().destinationCrs()
+            if (
+                layer_crs is not None and canvas_crs is not None
+                and layer_crs.isValid() and canvas_crs.isValid()
+                and layer_crs != canvas_crs
+            ):
+                transform = QgsCoordinateTransform(
+                    layer_crs, canvas_crs, _QgsProject.instance().transformContext()
+                )
+                extent = transform.transformBoundingBox(extent)
+        except Exception:
+            # Se la trasformazione fallisce per qualunque motivo,
+            # tentiamo lo zoom direttamente: in casi degeneri produrra'
+            # un extent strano ma non rompe nulla.
+            pass
+
+        # Piccolo margine attorno al Comune (5% per lato) per
+        # respirabilita' visiva: l'utente vede il contorno del Comune
+        # con un po' di contesto, non incollato ai bordi del canvas.
+        try:
+            extent.scale(1.10)
+        except Exception:
+            pass
+
+        try:
+            canvas.setExtent(extent)
+            canvas.refresh()
+        except Exception:
+            pass
+
     def _on_comune_return_pressed(self):
         if self._run_btn.isEnabled():
             self._on_run_clicked()
 
     def _on_refresh_comuni_clicked(self):
-        self._log_widget.appendPlainText("[INFO] Forzato refresh della lista Comuni...")
+        # Immediate visible feedback at the top of the dialog: the log
+        # widget lives below and may be off-screen on small displays.
+        self._set_label(
+            self._comune_validation_label,
+            "<b>Aggiornamento lista Comuni in corso...</b> Contatto il "
+            "servizio REST di Regione Lombardia.",
+            STATUS_INFO_STYLE,
+        )
+        try:
+            self._log_widget.appendPlainText(
+                "[INFO] Forzato refresh della lista Comuni..."
+            )
+        except Exception:
+            pass
+        QApplication.processEvents()
         self._populate_comune_autocomplete(force_refresh=True)
 
     def _on_istat_setup_clicked(self):
@@ -978,6 +1472,251 @@ class DusafMainDialog(QDialog):
             )
             self._refresh_data_status()
             self._populate_comune_autocomplete(force_refresh=True)
+
+    def _on_open_geoportale_clicked(self):
+        """Open the official RL Geoportale DUSAF 7.0 download page."""
+        url = (
+            "https://www.geoportale.regione.lombardia.it/download-pacchetti"
+            "?p_p_id=dwnpackageportlet_WAR_gptdownloadportlet"
+            "&p_p_lifecycle=0&p_p_state=normal&p_p_mode=view"
+            "&_dwnpackageportlet_WAR_gptdownloadportlet_metadataid="
+            "r_lombar%3A7cd05e9f-b693-4d7e-a8de-71b40b45f54e"
+            "&_jsfBridgeRedirect=true"
+        )
+        QDesktopServices.openUrl(QUrl(url))
+        try:
+            self._log_widget.appendPlainText(
+                "[INFO] Aperto il Geoportale RL nel browser. Scarica lo ZIP "
+                "DUSAF 7.0, estrailo, poi clicca \"Carica DUSAF7.shp nel "
+                "progetto...\" per aggiungerlo al progetto QGIS."
+            )
+        except Exception:
+            pass
+
+    def _on_load_dusaf_clicked(self):
+        """Let the user pick the DUSAF ZIP (or already extracted .shp) and
+        load DUSAF7 into the current project.
+
+        Most users have just downloaded the Geoportale RL ZIP and would
+        otherwise need to know that they have to extract it first. We
+        accept both: if the picked file is a ZIP we transparently extract
+        ``DUSAF7.*`` (skipping ``DUSAF7_FILARI.*``, which is a separate
+        linear-features layer) to a sibling directory named
+        ``<zipstem>_estratto/`` and then load the resulting shapefile.
+        Extraction is one-shot per ZIP: a second click on the same ZIP
+        reuses the existing extraction folder.
+
+        Advanced users that have already extracted the shapefile can
+        still pick ``DUSAF7.shp`` directly.
+        """
+        start_dir = self._settings.value(
+            SETTINGS_PREFIX + "/last_dusaf_dir",
+            os.path.expanduser("~"),
+            type=str,
+        ) or os.path.expanduser("~")
+
+        filename, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleziona il pacchetto DUSAF (ZIP del Geoportale RL o .shp estratto)",
+            start_dir,
+            "Pacchetto DUSAF (*.zip *.shp);;"
+            "Archivio ZIP Geoportale (*.zip);;"
+            "Shapefile DUSAF7 (*.shp);;"
+            "Tutti i file (*)",
+        )
+        if not filename:
+            return
+
+        # Persist the directory so subsequent loads start in the same place.
+        self._settings.setValue(
+            SETTINGS_PREFIX + "/last_dusaf_dir", os.path.dirname(filename)
+        )
+
+        # If the user picked a ZIP, extract DUSAF7 next to it.
+        shp_path = filename
+        if filename.lower().endswith(".zip"):
+            try:
+                QApplication.setOverrideCursor(CURSOR_WAIT)
+                try:
+                    shp_path = self._extract_dusaf_from_zip(filename)
+                finally:
+                    QApplication.restoreOverrideCursor()
+            except Exception as exc:
+                QMessageBox.critical(
+                    self,
+                    "Errore estrazione ZIP DUSAF",
+                    "Non è stato possibile estrarre DUSAF7.shp dallo ZIP:\n"
+                    "{}\n\n"
+                    "Verifica di aver scaricato il pacchetto DUSAF 7.0 "
+                    "completo dal Geoportale Regione Lombardia.".format(exc),
+                )
+                return
+
+        # Default layer name = file stem, so the back-compat detector
+        # ("DUSAF7"/"DUSAF 7"/etc.) recognises it without extra hints.
+        layer_name = os.path.splitext(os.path.basename(shp_path))[0]
+
+        layer = None
+        if self.iface is not None and hasattr(self.iface, "addVectorLayer"):
+            layer = self.iface.addVectorLayer(shp_path, layer_name, "ogr")
+
+        if layer is None or not getattr(layer, "isValid", lambda: False)():
+            # Fallback: try the lower-level path. addVectorLayer returns
+            # None on failure in some QGIS builds.
+            layer = QgsVectorLayer(shp_path, layer_name, "ogr")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Layer DUSAF non valido",
+                    "Lo shapefile estratto non è valido o mancano i file "
+                    "sidecar (.dbf / .shx / .prj). Riprova selezionando lo "
+                    "ZIP originale del Geoportale RL.",
+                )
+                return
+
+        try:
+            self._log_widget.appendPlainText(
+                "[INFO] Layer DUSAF caricato: {} ({} feature)".format(
+                    layer.name(), layer.featureCount()
+                )
+            )
+        except Exception:
+            pass
+
+        # Refresh the status badge: the DUSAF source has just become
+        # "project layer", so the user gets immediate visual confirmation.
+        self._refresh_data_status()
+
+    # Extensions of the Esri shapefile that compose the DUSAF7 dataset
+    # inside the official Geoportale RL ZIP. The first four are required
+    # by GDAL/OGR for a valid layer; the rest are optional but improve
+    # performance (spatial index) or metadata.
+    _DUSAF_SHAPEFILE_REQUIRED_EXTENSIONS = (".shp", ".dbf", ".shx", ".prj")
+    _DUSAF_SHAPEFILE_OPTIONAL_EXTENSIONS = (
+        ".cpg", ".sbn", ".sbx", ".shp.xml", ".qpj"
+    )
+    _DUSAF_TARGET_STEM = "DUSAF7"
+
+    def _extract_dusaf_from_zip(self, zip_path):
+        """Extract ``DUSAF7.*`` from a Regione Lombardia DUSAF ZIP.
+
+        Returns the path of the extracted ``DUSAF7.shp``.
+
+        Extraction directory is ``<zipdir>/<zipstem>_estratto/``. If that
+        directory already contains a valid set of shapefile sidecars
+        (.shp/.dbf/.shx/.prj), the function returns the existing path
+        without re-extracting: large ZIPs (~321 MB compressed) take time
+        to unpack and the user would otherwise pay that cost on every
+        load.
+
+        ``DUSAF7_FILARI.*`` (a separate linear-features layer published
+        in the same ZIP) is deliberately skipped: it is not used by the
+        plugin and would clutter the extracted directory.
+        """
+        zip_dir = os.path.dirname(os.path.abspath(zip_path))
+        zip_stem = os.path.splitext(os.path.basename(zip_path))[0]
+        extract_dir = os.path.join(zip_dir, "{}_estratto".format(zip_stem))
+
+        expected_shp = os.path.join(
+            extract_dir, self._DUSAF_TARGET_STEM + ".shp"
+        )
+
+        # Fast path: a previous extraction of the same ZIP is present
+        # and complete. Reuse it.
+        required_present = all(
+            os.path.isfile(
+                os.path.join(
+                    extract_dir, self._DUSAF_TARGET_STEM + ext
+                )
+            )
+            for ext in self._DUSAF_SHAPEFILE_REQUIRED_EXTENSIONS
+        )
+        if required_present:
+            try:
+                self._log_widget.appendPlainText(
+                    "[INFO] Estrazione già presente: {}. Riuso i file "
+                    "esistenti senza ri-estrarre.".format(extract_dir)
+                )
+            except Exception:
+                pass
+            return expected_shp
+
+        # Inspect the ZIP first and collect the DUSAF7.* members
+        # (case-insensitive). DUSAF7_FILARI.* members are excluded:
+        # ``basename.startswith(stem + ".")`` matches ``DUSAF7.shp`` but
+        # not ``DUSAF7_FILARI.shp`` because of the dot separator.
+        stem_lower = self._DUSAF_TARGET_STEM.lower()
+        all_extensions = (
+            self._DUSAF_SHAPEFILE_REQUIRED_EXTENSIONS
+            + self._DUSAF_SHAPEFILE_OPTIONAL_EXTENSIONS
+        )
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zip_members = zf.namelist()
+
+            members_by_ext = {}
+            for member in zip_members:
+                basename_lower = os.path.basename(member).lower()
+                if not basename_lower.startswith(stem_lower + "."):
+                    continue
+                # Determine which target extension this member matches.
+                # Prefer the longest matching extension (".shp.xml" wins
+                # over ".xml") to avoid double-mapping.
+                matched_ext = None
+                for ext in sorted(all_extensions, key=len, reverse=True):
+                    if basename_lower == (stem_lower + ext.lower()):
+                        matched_ext = ext
+                        break
+                if matched_ext is not None:
+                    members_by_ext[matched_ext] = member
+
+            missing_required = [
+                ext for ext in self._DUSAF_SHAPEFILE_REQUIRED_EXTENSIONS
+                if ext not in members_by_ext
+            ]
+            if missing_required:
+                raise ValueError(
+                    "Lo ZIP selezionato non contiene tutti i file richiesti "
+                    "dello shapefile DUSAF7. Mancanti: {}.".format(
+                        ", ".join(missing_required)
+                    )
+                )
+
+            # Extraction: write into a fresh directory atomically. If
+            # something goes wrong mid-extraction we leave a clearly
+            # named ``_estratto/`` folder so the user can delete it
+            # manually if needed (we do NOT auto-clean: the ZIP itself
+            # is 321 MB and the user might prefer to debug rather than
+            # re-extract from scratch).
+            os.makedirs(extract_dir, exist_ok=True)
+            try:
+                self._log_widget.appendPlainText(
+                    "[INFO] Estrazione DUSAF7 da ZIP in: {}".format(
+                        extract_dir
+                    )
+                )
+            except Exception:
+                pass
+
+            for ext, member in members_by_ext.items():
+                target_path = os.path.join(
+                    extract_dir, self._DUSAF_TARGET_STEM + ext
+                )
+                with zf.open(member) as src, open(target_path, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                try:
+                    self._log_widget.appendPlainText(
+                        "  estratto {}".format(
+                            self._DUSAF_TARGET_STEM + ext
+                        )
+                    )
+                except Exception:
+                    pass
+                QApplication.processEvents()
+
+        return expected_shp
 
     def _on_run_clicked(self):
         key = _normalize_comune_key(self._comune_input.text())
@@ -1054,16 +1793,29 @@ class DusafMainDialog(QDialog):
                     f"     Cartella:   {self._last_output_dir}"
                 )
                 summary = (
-                    f"Il workflow per {canonical} è terminato con successo.\n\n"
+                    f"Il flusso di lavoro per {canonical} è terminato con successo.\n\n"
                     f"Output:\n- {gpkg}\n- {csv}"
                 )
             else:
                 summary = (
-                    f"Il workflow per {canonical} è terminato con successo.\n\n"
+                    f"Il flusso di lavoro per {canonical} è terminato con successo.\n\n"
                     "Modalità memoria: i 4 layer di output sono nel progetto come "
                     "layer temporanei. Tasto destro -> 'Rendi permanente' per "
                     "salvarli su disco."
                 )
+
+            # Applica al volo la trasparenza scelta dall'utente al layer
+            # clip QC appena creato dal workflow. In questo modo il valore
+            # del slider conta anche per la prima run di sessione (non
+            # solo per i refresh successivi).
+            self._apply_clip_qc_opacity_to_project_layers(
+                int(self._opacity_slider.value())
+            )
+
+            # Zoom automatico all'estensione del Comune appena processato:
+            # appena il workflow finisce l'utente vede la mappa centrata
+            # sul Comune analizzato, senza dover cercare manualmente.
+            self._zoom_canvas_to_processed_comune(canonical)
 
             QMessageBox.information(
                 self,
@@ -1091,6 +1843,8 @@ class DusafMainDialog(QDialog):
         self._close_btn.setEnabled(not running)
         self._refresh_comuni_btn.setEnabled(not running)
         self._istat_btn.setEnabled(not running)
+        self._open_geoportale_btn.setEnabled(not running)
+        self._load_dusaf_btn.setEnabled(not running)
         self._comune_input.setEnabled(not running)
         self._sliver_spin.setEnabled(not running)
         self._mode_memory_radio.setEnabled(not running)
@@ -1102,7 +1856,7 @@ class DusafMainDialog(QDialog):
         self._help_btn.setEnabled(not running)
         self._cancel_btn.setEnabled(running)
         if running:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.setOverrideCursor(CURSOR_WAIT)
         else:
             QApplication.restoreOverrideCursor()
             self._update_run_state()

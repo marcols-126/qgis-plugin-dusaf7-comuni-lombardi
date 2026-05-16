@@ -17,6 +17,12 @@ from qgis.core import (
     QgsVectorLayer,
 )
 
+from ..compat import (
+    VFW_CREATE_OR_OVERWRITE_FILE,
+    VFW_CREATE_OR_OVERWRITE_LAYER,
+    VFW_NO_ERROR,
+)
+
 
 STYLE_FOLDER_NAME = "stili"
 STYLE_DUSAF_FINAL = "DUSAF7 - superfici.qml"
@@ -106,9 +112,9 @@ def save_layer_to_gpkg(layer, gpkg_path, layer_name, overwrite_file, context, fe
     options.layerName = layer_name
 
     if overwrite_file:
-        options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteFile
+        options.actionOnExistingFile = VFW_CREATE_OR_OVERWRITE_FILE
     else:
-        options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+        options.actionOnExistingFile = VFW_CREATE_OR_OVERWRITE_LAYER
 
     result = QgsVectorFileWriter.writeAsVectorFormatV3(
         layer,
@@ -120,7 +126,7 @@ def save_layer_to_gpkg(layer, gpkg_path, layer_name, overwrite_file, context, fe
     err_code = result[0]
     err_msg = result[1] if len(result) > 1 else ""
 
-    if err_code != QgsVectorFileWriter.NoError:
+    if err_code != VFW_NO_ERROR:
         raise QgsProcessingException(f"Errore salvataggio layer '{layer_name}': {err_msg}")
 
     feedback.pushInfo(f"[OK] Salvato layer GeoPackage: {layer_name}")

@@ -35,6 +35,17 @@ from qgis.core import (
     QgsVectorLayer,
 )
 
+from .compat import (
+    CASE_INSENSITIVE,
+    COMPLETER_POPUP,
+    CURSOR_WAIT,
+    FEATURE_REQUEST_GEOMETRY_NO_CHECK,
+    FEATURE_REQUEST_GEOMETRY_SKIP_INVALID,
+    FEATURE_REQUEST_NO_GEOMETRY,
+    MATCH_STARTS_WITH,
+    PROC_NUM_DOUBLE,
+    TEXT_FORMAT_RICH,
+)
 from .data_sources import normalize_comune_display_name
 from .workflow import pipeline, qc, output
 from .workflow.data_resolver import (
@@ -285,13 +296,13 @@ class ComuneAutocompleteWidgetWrapper(WidgetWrapper):
 
         self._alert_label = QLabel()
         self._alert_label.setWordWrap(True)
-        self._alert_label.setTextFormat(Qt.RichText)
+        self._alert_label.setTextFormat(TEXT_FORMAT_RICH)
 
         self._model = QStringListModel([])
         self._completer = QCompleter(self._model, self._line_edit)
-        self._completer.setCaseSensitivity(Qt.CaseInsensitive)
-        self._completer.setFilterMode(Qt.MatchStartsWith)
-        self._completer.setCompletionMode(QCompleter.PopupCompletion)
+        self._completer.setCaseSensitivity(CASE_INSENSITIVE)
+        self._completer.setFilterMode(MATCH_STARTS_WITH)
+        self._completer.setCompletionMode(COMPLETER_POPUP)
 
         self._line_edit.setCompleter(self._completer)
 
@@ -345,7 +356,7 @@ class ComuneAutocompleteWidgetWrapper(WidgetWrapper):
                 attrs.append(region_name_field)
 
             request = QgsFeatureRequest()
-            request.setFlags(QgsFeatureRequest.NoGeometry)
+            request.setFlags(FEATURE_REQUEST_NO_GEOMETRY)
             request.setSubsetOfAttributes(attrs, layer.fields())
 
             names = set()
@@ -405,7 +416,7 @@ class ComuneAutocompleteWidgetWrapper(WidgetWrapper):
                 background="#fff8e1",
                 border="#e0b400",
             )
-            QApplication.setOverrideCursor(Qt.WaitCursor)
+            QApplication.setOverrideCursor(CURSOR_WAIT)
             QApplication.processEvents()
 
             try:
@@ -630,7 +641,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             <li><b>{STYLE_SLIVERS}</b></li>
         </ul>
 
-        <h4>Workflow (9 fasi)</h4>
+        <h4>Flusso di lavoro (9 fasi)</h4>
         <ol>
             <li>Fix geometries Comuni.</li>
             <li>Riproiezione Comuni in EPSG:32632.</li>
@@ -681,7 +692,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.SLIVER_MIN_AREA_M2,
                 "Area minima slivers in m²",
-                type=QgsProcessingParameterNumber.Double,
+                type=PROC_NUM_DOUBLE,
                 defaultValue=1.0,
                 minValue=0.0,
             )
@@ -715,6 +726,42 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
 
     def _warn(self, feedback, text):
         feedback.reportError(str(text), fatalError=False)
+
+    def _log_step_count(self, feedback, step_name, n_in, n_out):
+        """Log "feature in -> feature out" for a pipeline step.
+
+        Emits a plain info line in the normal case and a warning when an
+        unexpected feature loss is detected (>0.5%). Tracks downstream
+        which step actually drops features, so future regressions of the
+        kind fixed in 0.3.5 (prefilter silently dropping invalid
+        geometries) are visible in the log instead of being invisible.
+        """
+        if feedback is None:
+            return
+        try:
+            n_in = int(n_in)
+            n_out = int(n_out)
+        except (TypeError, ValueError):
+            return
+
+        if n_in <= 0:
+            self._msg(feedback, "[STEP] {}: out={}".format(step_name, n_out))
+            return
+
+        delta = n_out - n_in
+        pct = (delta / n_in) * 100.0
+        msg = "[STEP] {}: {} -> {} ({:+d}, {:+.2f}%)".format(
+            step_name, n_in, n_out, delta, pct
+        )
+
+        # Flag dropouts >0.5% as warnings: pipelines that fix/repair
+        # geometries can legitimately split or merge polygons (slight
+        # +/-), but losing more than half a percent on a single step is
+        # suspicious and likely a bug.
+        if pct < -0.5:
+            self._warn(feedback, msg + "  <-- attenzione: calo anomalo")
+        else:
+            self._msg(feedback, msg)
 
     # -------------------------------------------------------------------------
     # UTILITY
@@ -803,22 +850,30 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
     def _get_required_dusaf_layer(self, comune_geometry_layer=None, feedback=None, context=None):
         """Return a DUSAF layer.
 
-        Priority: layer already loaded in the QGIS project (back-compat); when
-        not available the layer is fetched from the Regione Lombardia ArcGIS
-        REST service for the envelope of ``comune_geometry_layer`` and returned
-        as an in-memory layer in EPSG:32632.
+        Source resolution order:
 
-        When the project layer is used AND a Comune geometry is available, the
-        layer is pre-filtered to the Comune envelope via ``native:extractbyextent``
-        before being returned. This avoids running fix_geometries and reproject
-        on the entire Lombardia dataset (millions of features) when we only
-        need the subset that overlaps the selected Comune.
+        1. **Project layer** already loaded in the QGIS project (back-compat
+           and recommended way to work offline: the user adds DUSAF7 from
+           the RL Geoportale ZIP to the project once, then the plugin
+           detects it automatically).
+        2. **REST fetch** from the Regione Lombardia ArcGIS service for the
+           envelope of ``comune_geometry_layer``. Useful for quick tests
+           when the user does not want to download the full DUSAF dataset.
+
+        When a project layer is used AND a Comune geometry is available,
+        the layer is pre-filtered to the Comune envelope via
+        ``native:extractbyextent`` before being returned. This avoids running
+        fix_geometries and reproject on the entire Lombardia dataset
+        (millions of features) when we only need the subset that overlaps
+        the selected Comune.
         """
         layer = _find_dusaf_project_layer()
 
         if layer is not None and layer.isValid():
             if feedback is not None:
-                feedback.pushInfo(f"[DATA] DUSAF da progetto: {layer.name()}")
+                feedback.pushInfo(
+                    f"[DATA] DUSAF da progetto: {layer.name()}"
+                )
 
             if comune_geometry_layer is not None and context is not None:
                 try:
@@ -845,8 +900,8 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
 
         if feedback is not None:
             feedback.pushInfo(
-                "[DATA] DUSAF non in progetto: fetch REST dal servizio Regione Lombardia "
-                "per l'envelope del Comune..."
+                "[DATA] DUSAF non in progetto: fetch REST dal servizio Regione "
+                "Lombardia per l'envelope del Comune..."
             )
 
         envelope = envelope_from_layer_extent(comune_geometry_layer, padding_m=50.0)
@@ -990,15 +1045,28 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
                 f"({crs_authid}) prima di fix/reproject..."
             )
 
-        # Tolerate invalid geometries during the extract step: the desktop
-        # DUSAF7 dataset typically has a few thousand invalid features that
-        # cause native:extractbyextent to abort. Skipping invalid features
-        # is safe here because FASE 1 (fix_geometries) of the workflow
-        # repairs them later anyway. We restore the original setting in a
-        # finally block to avoid leaking it onto subsequent algorithms.
+        # Tolerate invalid geometries during the extract step: the
+        # official DUSAF 7.0 shapefile from the Regione Lombardia
+        # Geoportale contains thousands of invalid polygons (mostly
+        # self-intersections in the dense urban classification). The
+        # previous version of this method asked ``extractbyextent`` to
+        # SKIP invalid features ("GeometrySkipInvalid"), which silently
+        # dropped them from the workflow entirely - the FASE 1 fix
+        # never saw them, so they did not appear in the clip QC output.
+        # The visible effect was holes in the Milano clip QC (gray) when
+        # overlaid against the raw DUSAF (red), exactly where the
+        # densely-tessellated invalid polygons live.
+        #
+        # The correct setting is GeometryNoCheck: features with invalid
+        # geometries are passed through to the next step
+        # (``pipeline.fix_geometries``) which repairs them properly
+        # (snapping, dedup, ring fix). The bbox intersection test used
+        # by ``extractbyextent`` does NOT need a valid geometry: it only
+        # reads min/max coords of the bounding box, which is well
+        # defined even for self-intersecting polygons.
         original_invalid_check = context.invalidGeometryCheck()
         try:
-            context.setInvalidGeometryCheck(QgsFeatureRequest.GeometrySkipInvalid)
+            context.setInvalidGeometryCheck(FEATURE_REQUEST_GEOMETRY_NO_CHECK)
             filtered_layer = pipeline.run_algorithm(
                 "native:extractbyextent",
                 {
@@ -1051,7 +1119,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             attrs.append(region_name_field)
 
         request = QgsFeatureRequest()
-        request.setFlags(QgsFeatureRequest.NoGeometry)
+        request.setFlags(FEATURE_REQUEST_NO_GEOMETRY)
         request.setSubsetOfAttributes(attrs, comuni_layer.fields())
 
         valid_names = {}
@@ -1394,9 +1462,20 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
 
         self._msg(feedback, "[QC-4 OK] Nessun codice DUSAF nullo o vuoto rilevato.")
 
+        # Feature-count tracking per fase: serve a diagnosticare bug di
+        # "feature scomparse" come quello del prefilter (vedi 0.3.5).
+        # Ogni step pesante logga "feature in -> feature out"; cali
+        # anomali (>0.5%) generano un warning visibile nel log.
+        n_in = dusaf.featureCount()
+
         dusaf_fix_pre = pipeline.fix_geometries(dusaf, context, feedback, "DUSAF7_fix_pre")
+        self._log_step_count(feedback, "fix_geometries (pre-reproject)", n_in, dusaf_fix_pre.featureCount())
+
         dusaf_32632 = pipeline.reproject(dusaf_fix_pre, target_crs(), context, feedback, "DUSAF7_EPSG32632")
+        self._log_step_count(feedback, "reproject EPSG:32632", dusaf_fix_pre.featureCount(), dusaf_32632.featureCount())
+
         dusaf_32632_fix = pipeline.fix_geometries(dusaf_32632, context, feedback, "DUSAF7_EPSG32632_fix")
+        self._log_step_count(feedback, "fix_geometries (post-reproject)", dusaf_32632.featureCount(), dusaf_32632_fix.featureCount())
 
         feedback.setProgress(50)
 
@@ -1410,6 +1489,18 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
             context,
             feedback,
             f"DUSAF7_clip_{safe_comune}",
+        )
+        # Il clip e' un'operazione di filtraggio per definizione:
+        # scarta le feature interamente fuori dal poligono del Comune.
+        # Un calo grande qui e' normale e atteso (la maggior parte del
+        # DUSAF pre-filtrato sta nelle aree limitrofe del bbox ma non
+        # nel Comune vero e proprio). Log neutrale, niente warning.
+        self._msg(
+            feedback,
+            "[STEP] clip sul Comune: {} -> {} (calo atteso: feature "
+            "interamente fuori dal Comune).".format(
+                dusaf_32632_fix.featureCount(), dusaf_clip.featureCount()
+            ),
         )
 
         if dusaf_clip.featureCount() == 0:
@@ -1445,6 +1536,14 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 5 - Calcolo aree preliminari e slivers")
         self._msg(feedback, "------------------------------------------------------")
 
+        # NB. ``COD_TOT`` viene preservato esattamente come nel DUSAF
+        # originale (lunghezza variabile da LIV3 = 3 caratteri a LIV5 =
+        # 5 caratteri). Il QML categorizzato fornito dal plugin contiene
+        # gia' regole per tutti i livelli (LIV3/LIV4/LIV5), quindi non
+        # serve troncare. Un precedente tentativo di troncamento a LIV4
+        # (rimosso in 0.3.6) impediva il match delle regole LIV5
+        # specifiche (es. ``12111``, ``12122``, ``21131``...) e mandava
+        # quei poligoni nella categoria di fallback.
         dusaf_clip_qc = qc.add_area_fields(
             dusaf_clip_single_fix,
             sliver_min_area_m2=sliver_min_area_m2,
@@ -1480,6 +1579,11 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         self._msg(feedback, "FASE 6 - Dissolve per classe DUSAF")
         self._msg(feedback, "------------------------------------------------------")
 
+        # Group by [COD_TOT, DESCR]: nel DUSAF originale ogni codice ha
+        # esattamente una descrizione associata (relazione 1:1 a livello
+        # LIV3/LIV4/LIV5), quindi includere DESCR nel group key non
+        # frammenta le classi e preserva la descrizione testuale nella
+        # tabella di output e nel CSV.
         dusaf_diss = pipeline.dissolve_by_fields(
             dusaf_clip_qc,
             [class_field, desc_field],
@@ -1701,7 +1805,7 @@ class AnalisiDusaf7ComuneLombardoPluginAlgorithm(QgsProcessingAlgorithm):
         feedback.setProgress(100)
 
         self._msg(feedback, "======================================================")
-        self._msg(feedback, "WORKFLOW COMPLETATO")
+        self._msg(feedback, "FLUSSO DI LAVORO COMPLETATO")
         self._msg(feedback, "======================================================")
         if save_to_disk:
             self._msg(feedback, f"GeoPackage: {gpkg_path}")
