@@ -6,7 +6,7 @@
 name=Analisi DUSAF 7 Comune Lombardo
 qgisMinimumVersion=3.34
 description=Automated DUSAF 7 land-use analysis for Lombardy municipalities via Regione Lombardia REST services. QC-4 audit, GeoPackage + CSV export. (Plugin regionale italiano.)
-version=0.3.11
+version=0.3.12
 author=Marco Stefano La Sala
 email=214729081+marcols-126@users.noreply.github.com
 
@@ -29,7 +29,29 @@ repository=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi
 
 hasProcessingProvider=yes
 
-changelog=0.3.11 (2026-05-16)
+changelog=0.3.12 (2026-05-16)
+        - Close 14 Flake8 findings raised by the plugins.qgis.org Code
+          Quality scanner on 0.3.11:
+          * F401 (9): unused imports left over from the iterative
+            refactor between 0.2.14 and 0.3.10. Removed:
+            - algorithm.py: `Qt`, `FEATURE_REQUEST_GEOMETRY_SKIP_INVALID`
+            - ui/istat_setup_dialog.py: `Qt`, `QFrame`, `QSizePolicy`
+            - ui/main_dialog.py: `Qt`, `QTextCursor`, `QFrame`,
+              `QSizePolicy`
+            All these symbols were superseded by compat-aliased
+            equivalents used elsewhere in the same files.
+          * W503 (5): line break before binary operator. The
+            plugins.qgis.org Flake8 profile enables both W503 and W504
+            (mutually exclusive in standard pycodestyle), so binary
+            expressions split across multiple lines must be rewritten
+            either fully on one line or using intermediate variables.
+            Rewrote five offending expressions in ui/main_dialog.py
+            with intermediate boolean variables / .format() calls
+            so neither W503 nor W504 is triggered.
+        - No functional change, no algorithm change, no UI change.
+          Pure code quality cleanup to keep the plugins.qgis.org
+          Quality dashboard green.
+    0.3.11 (2026-05-16)
         - Fix: lo zoom automatico al Comune dopo l'esecuzione
           (introdotto in 0.3.7) zoommava sul Comune SBAGLIATO quando
           l'utente eseguiva il flusso piu' volte in sequenza su Comuni

@@ -19,8 +19,8 @@ import zipfile
 
 import processing
 
-from qgis.PyQt.QtCore import Qt, QSettings, QStringListModel, QUrl
-from qgis.PyQt.QtGui import QDesktopServices, QFont, QTextCursor
+from qgis.PyQt.QtCore import QSettings, QStringListModel, QUrl
+from qgis.PyQt.QtGui import QDesktopServices, QFont
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -29,7 +29,6 @@ from qgis.PyQt.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -42,7 +41,6 @@ from qgis.PyQt.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
-    QSizePolicy,
     QSpacerItem,
     QVBoxLayout,
     QWidget,
@@ -903,10 +901,11 @@ class DusafMainDialog(QDialog):
             self._comune_completer_model.setStringList([])
             self._set_label(
                 self._comune_validation_label,
-                "<b>Errore caricamento lista Comuni</b>: " + str(exc)
-                + "<br><i>Il servizio Regione Lombardia potrebbe essere "
+                "<b>Errore caricamento lista Comuni</b>: {}<br>"
+                "<i>Il servizio Regione Lombardia potrebbe essere "
                 "temporaneamente non disponibile. Riprova tra qualche "
-                "minuto, oppure configura la cache ISTAT ufficiale.</i>",
+                "minuto, oppure configura la cache ISTAT ufficiale.</i>"
+                .format(exc),
                 STATUS_ERROR_STYLE,
             )
             try:
@@ -1365,10 +1364,9 @@ class DusafMainDialog(QDialog):
         for candidate in project.mapLayers().values():
             name = getattr(candidate, "name", lambda: "")() or ""
             name_lower = name.lower()
-            if not (
-                name_lower.startswith(prefix_lower)
-                and name_lower.endswith(suffix_lower)
-            ):
+            starts = name_lower.startswith(prefix_lower)
+            ends = name_lower.endswith(suffix_lower)
+            if not (starts and ends):
                 continue
             middle = name[len(prefix_lower):-len(suffix_lower)]
             if middle.casefold().strip() == target_key:
@@ -1407,11 +1405,10 @@ class DusafMainDialog(QDialog):
 
             layer_crs = layer.crs()
             canvas_crs = canvas.mapSettings().destinationCrs()
-            if (
-                layer_crs is not None and canvas_crs is not None
-                and layer_crs.isValid() and canvas_crs.isValid()
-                and layer_crs != canvas_crs
-            ):
+            both_present = layer_crs is not None and canvas_crs is not None
+            both_valid = both_present and layer_crs.isValid() and canvas_crs.isValid()
+            different = both_valid and layer_crs != canvas_crs
+            if different:
                 transform = QgsCoordinateTransform(
                     layer_crs, canvas_crs, _QgsProject.instance().transformContext()
                 )
@@ -1648,10 +1645,9 @@ class DusafMainDialog(QDialog):
         # ``basename.startswith(stem + ".")`` matches ``DUSAF7.shp`` but
         # not ``DUSAF7_FILARI.shp`` because of the dot separator.
         stem_lower = self._DUSAF_TARGET_STEM.lower()
-        all_extensions = (
-            self._DUSAF_SHAPEFILE_REQUIRED_EXTENSIONS
-            + self._DUSAF_SHAPEFILE_OPTIONAL_EXTENSIONS
-        )
+        _required = list(self._DUSAF_SHAPEFILE_REQUIRED_EXTENSIONS)
+        _optional = list(self._DUSAF_SHAPEFILE_OPTIONAL_EXTENSIONS)
+        all_extensions = tuple(_required + _optional)
 
         with zipfile.ZipFile(zip_path, "r") as zf:
             zip_members = zf.namelist()

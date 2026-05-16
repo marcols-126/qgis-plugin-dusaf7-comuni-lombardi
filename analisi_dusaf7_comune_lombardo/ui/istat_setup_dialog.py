@@ -17,14 +17,12 @@ ArcGIS REST service when the cache is missing or stale.
 
 import os
 
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QDesktopServices, QFont
 from qgis.PyQt.QtCore import QUrl
+from qgis.PyQt.QtGui import QDesktopServices, QFont
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QDialog,
     QFileDialog,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -33,7 +31,6 @@ from qgis.PyQt.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QSpacerItem,
     QVBoxLayout,
     QWidget,

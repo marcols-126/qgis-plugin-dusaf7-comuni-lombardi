@@ -4,7 +4,7 @@ import os
 import re
 from datetime import datetime
 
-from qgis.PyQt.QtCore import Qt, QStringListModel
+from qgis.PyQt.QtCore import QStringListModel
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCompleter,
@@ -40,7 +40,6 @@ from .compat import (
     COMPLETER_POPUP,
     CURSOR_WAIT,
     FEATURE_REQUEST_GEOMETRY_NO_CHECK,
-    FEATURE_REQUEST_GEOMETRY_SKIP_INVALID,
     FEATURE_REQUEST_NO_GEOMETRY,
     MATCH_STARTS_WITH,
     PROC_NUM_DOUBLE,
