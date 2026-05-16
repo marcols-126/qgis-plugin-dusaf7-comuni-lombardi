@@ -10,8 +10,29 @@ the current Processing workflow.
 from dataclasses import dataclass
 import json
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import urlopen
+
+
+_ALLOWED_URL_SCHEMES = ("http", "https")
+
+
+def _validate_url_scheme(url):
+    """Reject URLs whose scheme is not HTTP(S).
+
+    Bandit's B310 ("urllib_urlopen") warns that ``urlopen`` accepts any
+    scheme, including ``file://`` and other schemes that can be abused as
+    SSRF or local-file disclosure vectors. We validate the scheme up-front
+    so the call site can safely use ``urlopen`` for HTTP(S) only.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_URL_SCHEMES:
+        raise ValueError(
+            "DUSAF ArcGIS URL has unsupported scheme '{}': only http/https allowed.".format(
+                parsed.scheme
+            )
+        )
+    return url
 
 
 DUSAF_SERVICE_URL = (
@@ -332,8 +353,9 @@ def _raise_if_canceled(feedback=None):
 
 def _read_json_url(url, timeout):
     """Read a JSON document from URL using standard library only."""
+    _validate_url_scheme(url)
     try:
-        with urlopen(url, timeout=timeout) as response:
+        with urlopen(url, timeout=timeout) as response:  # nosec B310 - scheme validated above
             status = getattr(response, "status", 200)
             if status < 200 or status >= 300:
                 raise ValueError(f"DUSAF ArcGIS request failed with HTTP status {status}.")
@@ -605,10 +627,10 @@ class LombardiaDusafClient:
                 _notify(
                     callback=callback,
                     feedback=feedback,
-                    message="DUSAF fetch stopped after reaching max_pages={}. ".format(max_pages)
-                    + "{} features collected; more features may be available.".format(
-                        len(features)
-                    ),
+                    message=(
+                        "DUSAF fetch stopped after reaching max_pages={}. "
+                        "{} features collected; more features may be available."
+                    ).format(max_pages, len(features)),
                 )
                 break
 

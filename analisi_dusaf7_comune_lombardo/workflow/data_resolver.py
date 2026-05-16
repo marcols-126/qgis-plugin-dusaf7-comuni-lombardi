@@ -12,6 +12,7 @@ logging.
 
 from qgis.core import QgsFeatureRequest, QgsVectorLayer
 
+from ..compat import FEATURE_REQUEST_NO_GEOMETRY
 from ..data_sources import (
     CacheManager,
     IstatBoundariesClient,
@@ -108,7 +109,7 @@ def _extract_lombard_comuni_from_istat_layer(layer):
 
     attrs = [a for a in (name_field, region_field, province_name_field, province_code_field, istat_field) if a]
     request = QgsFeatureRequest()
-    request.setFlags(QgsFeatureRequest.NoGeometry)
+    request.setFlags(FEATURE_REQUEST_NO_GEOMETRY)
     request.setSubsetOfAttributes(attrs, layer.fields())
 
     comuni = []
@@ -159,17 +160,24 @@ def get_comuni_list_for_autocomplete(cache_manager=None, force_refresh=False, fe
        back to the JSON cache.
 
     Cache failures degrade gracefully: the REST result is returned even when
-    persistence fails so the autocomplete still works. The ISTAT path is
-    skipped when ``force_refresh=True``.
+    persistence fails so the autocomplete still works.
+
+    ``force_refresh`` invalidates the *lightweight JSON cache* (the
+    last-known list from the RL REST endpoint). It does NOT invalidate the
+    ISTAT cache, which is an authoritative third-party source configured by
+    the optional setup dialog and must always win when present — otherwise
+    "Aggiorna cache lista Comuni" would silently bypass ISTAT and hit the
+    RL service even when the user has explicitly set ISTAT as the source.
     """
     cm = cache_manager or CacheManager()
 
-    if not force_refresh:
-        istat_layer = load_comuni_layer_from_istat_cache(cm)
-        if istat_layer is not None:
-            comuni = _extract_lombard_comuni_from_istat_layer(istat_layer)
-            if comuni:
-                return comuni, "istat_cache"
+    # ISTAT cache always wins when configured: it is an offline,
+    # authoritative dataset and is independent from the RL REST availability.
+    istat_layer = load_comuni_layer_from_istat_cache(cm)
+    if istat_layer is not None:
+        comuni = _extract_lombard_comuni_from_istat_layer(istat_layer)
+        if comuni:
+            return comuni, "istat_cache"
 
     cache = ComuniListCache(cm)
 

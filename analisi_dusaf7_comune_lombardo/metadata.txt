@@ -6,7 +6,7 @@
 name=Analisi DUSAF 7 Comune Lombardo
 qgisMinimumVersion=3.34
 description=Automated DUSAF 7 land-use analysis for Lombardy municipalities via Regione Lombardia REST services. QC-4 audit, GeoPackage + CSV export. (Plugin regionale italiano.)
-version=0.2.3
+version=0.3.12
 author=Marco Stefano La Sala
 email=214729081+marcols-126@users.noreply.github.com
 
@@ -15,19 +15,633 @@ about=English - QGIS plugin for automated land-use analysis in the municipalitie
     Workflow: Comune validation, geometry fix, EPSG:32632 reprojection, DUSAF clipping on the municipal perimeter, slivers handling, dissolve by land-use class, area calculation (m^2, hectares, percentages), and a QC-4 audit with area-conservation check.
     Output: multilayer GeoPackage with applied QML styles + CSV summary per class. A memory-only mode is available for quick analyses without writing files.
     Compatibility: QGIS 3.34 -> 4.99, Qt5 and Qt6.
+    Data attribution: DUSAF 7.0 and Ambiti Amministrativi (c) Regione Lombardia (CC BY 4.0); ISTAT 2026 boundaries (c) ISTAT (CC BY 4.0). Plugin code: AGPL-3.0.
     ---
     Italiano - Plugin QGIS per l'analisi automatica dell'uso del suolo nei Comuni lombardi, basato sul dataset DUSAF 7.0 di Regione Lombardia e sui confini amministrativi ufficiali.
     A differenza dei plugin tradizionali NON richiede il pre-caricamento manuale dei layer: i dati vengono scaricati al volo dai servizi REST ufficiali di Regione Lombardia (ArcGIS Server), con cache automatica nel profilo QGIS. Opzionalmente e' possibile attivare i confini ISTAT 2026 come fonte autoritativa.
-    Workflow: validazione del Comune, fix geometrie, riproiezione EPSG:32632, clip DUSAF sul perimetro, gestione slivers, dissolve per classe, calcolo superfici (m^2, ettari, percentuali) e audit QC-4 con controllo conservazione delle aree.
+    Flusso di lavoro: validazione del Comune, fix geometrie, riproiezione EPSG:32632, clip DUSAF sul perimetro, gestione slivers, dissolve per classe, calcolo superfici (m^2, ettari, percentuali) e audit QC-4 con controllo conservazione delle aree.
     Output: GeoPackage multilayer con stili QML applicati + CSV riepilogativo per classe. Modalita memoria disponibile per analisi rapide senza scrivere file.
     Compatibilita: QGIS 3.34 -> 4.99, Qt5 e Qt6. Pensato per istruttorie urbanistiche e analisi PGT.
+    Attribuzione dati: DUSAF 7.0 e Ambiti Amministrativi (c) Regione Lombardia (CC BY 4.0); confini ISTAT 2026 (c) ISTAT (CC BY 4.0). Codice plugin: AGPL-3.0.
 
 tracker=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi/issues
 repository=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi
 
 hasProcessingProvider=yes
 
-changelog=0.2.3 (2026-05-12)
+changelog=0.3.12 (2026-05-16)
+        - Close 14 Flake8 findings raised by the plugins.qgis.org Code
+          Quality scanner on 0.3.11:
+          * F401 (9): unused imports left over from the iterative
+            refactor between 0.2.14 and 0.3.10. Removed:
+            - algorithm.py: `Qt`, `FEATURE_REQUEST_GEOMETRY_SKIP_INVALID`
+            - ui/istat_setup_dialog.py: `Qt`, `QFrame`, `QSizePolicy`
+            - ui/main_dialog.py: `Qt`, `QTextCursor`, `QFrame`,
+              `QSizePolicy`
+            All these symbols were superseded by compat-aliased
+            equivalents used elsewhere in the same files.
+          * W503 (5): line break before binary operator. The
+            plugins.qgis.org Flake8 profile enables both W503 and W504
+            (mutually exclusive in standard pycodestyle), so binary
+            expressions split across multiple lines must be rewritten
+            either fully on one line or using intermediate variables.
+            Rewrote five offending expressions in ui/main_dialog.py
+            with intermediate boolean variables / .format() calls
+            so neither W503 nor W504 is triggered.
+        - No functional change, no algorithm change, no UI change.
+          Pure code quality cleanup to keep the plugins.qgis.org
+          Quality dashboard green.
+    0.3.11 (2026-05-16)
+        - Fix: lo zoom automatico al Comune dopo l'esecuzione
+          (introdotto in 0.3.7) zoommava sul Comune SBAGLIATO quando
+          l'utente eseguiva il flusso piu' volte in sequenza su Comuni
+          diversi senza chiudere il progetto. Esempio del bug:
+          processando Zibido San Giacomo -> Varese -> Cremona, lo zoom
+          finiva sempre su Zibido San Giacomo.
+          Doppia causa:
+          1) ``Confine <Comune> fix`` cercava con match esatto sul
+             nome inserito nel dialog ("Cremona", title case), ma il
+             layer prodotto dall'algoritmo ha sempre il nome del Comune
+             in MAIUSCOLO ("Confine CREMONA fix") quando arriva dal
+             servizio REST (il REST normalizza NOME_COM in uppercase).
+             Match esatto fallisce.
+          2) Il fallback "primo layer Confine ... fix nel progetto"
+             trovava il PRIMO inserito, cioe' Zibido. Tutti i Comuni
+             successivi venivano zoommati sul primo.
+          Fix: match case-insensitive sul nome del Comune dentro il
+          pattern "Confine <X> fix". Niente piu' fallback "primo a
+          caso": se per qualche motivo il layer del Comune appena
+          processato non si trova (caso teorico) il plugin non zoomma
+          invece di zoommare sul Comune sbagliato. Gestito anche il
+          caso di nomi duplicati (es. "Confine CREMONA fix (1)" se
+          QGIS de-duplica): si prende l'ultimo inserito, che e'
+          deterministicamente quello dell'ultima esecuzione.
+    0.3.10 (2026-05-16)
+        - Fix VERO del banner rosso "Consigliato: caricare DUSAF7 come
+          layer di progetto". I tentativi nelle 0.3.8 e 0.3.9 non
+          funzionavano per un bug nascosto: il QLabel del banner era
+          memorizzato in una variabile LOCALE (``dusaf_recommend``) e
+          non come attributo di istanza (``self._dusaf_recommend``).
+          ``_refresh_data_status`` controllava
+          ``hasattr(self, "_dusaf_recommend")``, che ritornava sempre
+          False, e ``setVisible(False)`` non veniva mai invocato. Il
+          banner restava visibile anche con DUSAF7 caricato come
+          layer di progetto, contraddicendo il badge verde sotto di
+          esso. Fix: il QLabel e' ora correttamente
+          ``self._dusaf_recommend`` e nasconde/mostra in tempo reale
+          grazie ai segnali ``QgsProject.layersAdded`` e
+          ``layersRemoved`` introdotti in 0.3.9.
+        - UX subtitle: i 3 passi della procedura sono ora elencati su
+          righe separate (uno per riga) invece che in linea, per
+          migliorare la leggibilita' a colpo d'occhio.
+    0.3.9 (2026-05-16)
+        - Fix: il banner rosso "Consigliato: caricare DUSAF7 come layer
+          di progetto" non spariva quando l'utente caricava DUSAF7 nel
+          progetto da FUORI il dialog (drag&drop dal Browser, menu
+          Layer -> Aggiungi, ecc.). Causa: ``_refresh_data_status``
+          veniva richiamato solo all'apertura del dialog
+          (``showEvent``) e dopo le azioni interne al dialog, ma non
+          quando il progetto cambiava da solo. Fix: il dialog si
+          iscrive ai segnali ``QgsProject.layersAdded`` e
+          ``QgsProject.layersRemoved`` per richiamare il refresh
+          ogni volta che un layer entra o esce dal progetto. I segnali
+          vengono disconnessi in ``closeEvent`` per pulizia. Verificato:
+          carico DUSAF7 via drag&drop -> il banner sparisce
+          immediatamente; rimuovo DUSAF7 dal pannello Layer -> il
+          banner ricompare.
+        - Lessico: nelle stringhe utente "workflow" diventa
+          "flusso di lavoro" (sostituzione mirata SOLO nei testi
+          user-visible italiani, codice e import Python invariati):
+          * subtitle del box DUSAF: "Dataset analizzato dal flusso di
+            lavoro";
+          * messaggio popup di fine esecuzione: "Il flusso di lavoro
+            per <Comune> è terminato con successo";
+          * intestazione finale del log: "FLUSSO DI LAVORO COMPLETATO";
+          * help dell'algoritmo (sezione "Flusso di lavoro (9 fasi)");
+          * about italiano nel plugin manager: "Flusso di lavoro: ...".
+          L'about inglese resta in inglese ("Workflow: ...").
+    0.3.8 (2026-05-16)
+        - UX polish:
+          * Il banner rosso "Consigliato: caricare DUSAF7 come layer di
+            progetto" scompare automaticamente quando DUSAF7 risulta gia'
+            caricato nel progetto. Quando il consiglio e' gia' seguito,
+            il banner diventa rumore visivo: nasconderlo e' una scelta
+            di pulizia. Compare di nuovo se l'utente rimuove DUSAF7 dal
+            progetto.
+          * Em-dash tipografico (-) sostituito con trattino normale (-)
+            in tutti i titoli e label utente del dialog principale (6
+            occorrenze: subtitle e titoli dei box INPUT/PROCESSING/
+            OUTPUT/ESECUZIONE). Coerenza tipografica e migliore
+            leggibilita' su tutte le piattaforme/font.
+          * Nuovo slider "Trasparenza layer clip QC" nel box
+            "PROCESSING - Comune da analizzare". L'utente puo' impostare
+            l'opacita' (0-100%%) del layer "DUSAF7 <Comune> - clip QC"
+            direttamente dal dialog, senza passare dal pannello Stile
+            Layer di QGIS. Utile per sovrapporre la classificazione
+            DUSAF a un'ortofoto o a un tassello di sfondo. Lo slider e
+            lo spinbox sono sincronizzati e l'opacita' si applica:
+            (a) immediatamente al layer clip QC gia' presente nel
+                progetto (es. da una precedente esecuzione);
+            (b) al termine di ogni nuova esecuzione, sul nuovo layer
+                clip QC creato dal workflow.
+            Il valore e' persistito in QSettings sotto
+            ``analisi_dusaf7_comune_lombardo/clip_qc_opacity_pct``.
+        - compat.py: nuovo alias ORIENT_HORIZONTAL per
+          Qt.Orientation.Horizontal (per Qt6-strict QGIS 4.0).
+        - Nessuna modifica al workflow di processing.
+    0.3.7 (2026-05-16)
+        - UX polish per orientare l'utente lungo il flusso INPUT ->
+          PROCESSING -> OUTPUT senza dover indovinare:
+          * Tutte le sezioni del dialog principale ora hanno un
+            prefisso che identifica il loro ruolo nel workflow:
+            "INPUT - Confini comunali (ISTAT)",
+            "INPUT - Uso del suolo (DUSAF 7.0)",
+            "PROCESSING - Comune da analizzare",
+            "PROCESSING - Parametri",
+            "OUTPUT - Modalità di salvataggio",
+            "ESECUZIONE - Log e progresso".
+            L'utente legge i titoli dei box dall'alto al basso e capisce
+            in 3 secondi cosa fa il plugin.
+          * Subtitle del dialog riscritto come procedura numerata in 3
+            passi: verifica INPUT, digita Comune, clicca Esegui.
+          * Box "INPUT - Uso del suolo": nuovo banner rosso prominente
+            che CONSIGLIA di caricare DUSAF7 come layer di progetto
+            (modalità offline, più robusta) e indica chiaramente che il
+            servizio REST è solo un'alternativa di ripiego soggetta a
+            interruzioni frequenti. Il banner usa stile box rosso/chiaro
+            leggibile sia su tema chiaro QGIS 3.x sia su tema scuro
+            QGIS 4.0.
+          * Pulsante "Esegui" rinforzato visivamente: bold, padding più
+            generoso, larghezza minima 160 px e icona ▶. Resta il
+            default-button del dialog (Invio dalla casella Comune lo
+            attiva).
+          * Sotto la spinbox della soglia slivers compare ora una
+            spiegazione concisa del significato del parametro e di
+            quando ha senso modificarlo.
+        - Comportamento post-esecuzione: appena l'algoritmo termina con
+          successo, il canvas QGIS fa zoom automatico sull'estensione
+          del Comune appena processato (con un margine del 10%% per
+          respirabilità visiva). Trova il layer "Confine <Comune> fix"
+          appena prodotto, trasforma l'extent dal CRS EPSG:32632 al
+          CRS del canvas (di solito EPSG:3857) e richiama
+          ``QgsMapCanvas.setExtent + refresh``. L'utente non deve più
+          cercare manualmente "dov'è andato il Comune" sulla mappa.
+        - Nessuna modifica al workflow di processing né ai QML né alle
+          fonti dati: solo polish UX dopo la risoluzione dei bug di
+          correttezza in 0.3.5 e 0.3.6.
+    0.3.6 (2026-05-16)
+        - REVERT del troncamento di COD_TOT a 4 cifre introdotto in
+          0.3.0. La rimozione era sbagliata fin dall'inizio: i QML
+          shipped con il plugin (DUSAF7 - clip QC.qml e DUSAF7 -
+          superfici.qml) sono gia' calibrati per categorizzare anche i
+          codici LIV5 a 5 cifre (es. "11231" Cascine, "12111-12112"
+          Insediamenti industriali, "12121-12126" Impianti pubblici/
+          tecnologici/cimiteri/militari/fotovoltaici, "21131-21132"
+          Colture orticole, "21141-21142" Colture floro-vivaistiche).
+          Troncare COD_TOT a 4 caratteri rompeva il match contro queste
+          regole LIV5 specifiche: i poligoni cadevano nella categoria
+          di fallback ("altri valori") e nella mappa apparivano grigi
+          neutri o non resi. La user-visible symptom era "il QML non
+          prende correttamente alcune simbologie" anche dopo il fix dei
+          buchi della 0.3.5.
+          Fix:
+          * Rimosso lo step ``pipeline.truncate_string_field`` prima di
+            ``add_area_fields``. COD_TOT conserva ora la lunghezza
+            variabile (LIV3=3 char, LIV4=4 char, LIV5=5 char) come nel
+            DUSAF originale.
+          * Il dissolve di FASE 6 e' di nuovo ``[COD_TOT, DESCR]``:
+            nell'originale DUSAF la relazione COD_TOT -> DESCR e' 1:1
+            ad ogni livello, quindi includere DESCR non frammenta le
+            classi e preserva la descrizione testuale per CSV/labels.
+          * L'helper ``pipeline.truncate_string_field`` resta nel
+            modulo (non chiamato) per riuso futuro.
+        - Logging diagnostico per il clip ora correttamente neutro: il
+          clip e' un'operazione di filtraggio per design (scarta le
+          feature DUSAF interamente fuori dal Comune) e non deve far
+          scattare il warning "calo anomalo". Le altre fasi
+          (fix_geometries x2, reproject) restano sotto sorveglianza.
+    0.3.5 (2026-05-16)
+        - Fix correttezza CRITICO: il prefiltro DUSAF al bounding box
+          del Comune scartava silenziosamente le feature con geometria
+          invalida. Visibile come "buchi" nel clip QC quando lo si
+          confronta con il DUSAF originale (chiazze rosse visibili
+          dentro Milano, esattamente dove vivono le molte
+          auto-intersezioni dei poligoni urbani densi del SHP del
+          Geoportale RL).
+          Causa: ``_prefilter_dusaf_by_envelope`` impostava
+          ``context.setInvalidGeometryCheck(GeometrySkipInvalid)`` per
+          evitare presunti aborti di ``native:extractbyextent`` su
+          geometrie auto-intersecanti. Conseguenza: quelle feature
+          venivano scartate PRIMA di arrivare al fix_geometries della
+          FASE 1, quindi non finivano mai nel clip QC nè nella
+          dissolve nè nelle statistiche.
+          Fix: il prefiltro ora usa ``GeometryNoCheck``. Le feature con
+          geometria invalida arrivano integre al fix_geometries della
+          FASE 1 che le ripara (snapping, dedup, ring fix) prima del
+          clip vero e proprio. Il bbox check di ``extractbyextent``
+          non ha bisogno di geometrie valide: opera sui min/max coord
+          del bounding box, ben definito anche per polygons
+          self-intersecting.
+        - Logging diagnostico per ogni step pesante della pipeline. Il
+          log d'esecuzione ora mostra "[STEP] <nome>: <in> -> <out>"
+          per fix_geometries (x2), reproject, clip. Quando un singolo
+          step perde >0.5%% di feature emette un warning visibile, così
+          futuri bug analoghi (feature silenziosamente droppate da una
+          fase del workflow) sono individuabili dal log invece di
+          richiedere il confronto visivo simbolo-singolo grigio vs
+          DUSAF rosso.
+        - compat.py: nuovo alias FEATURE_REQUEST_GEOMETRY_NO_CHECK per
+          il valore enum corrispondente di Qt6 strict.
+    0.3.4 (2026-05-15)
+        - UX: the "Carica DUSAF nel progetto..." button now accepts the
+          Geoportale RL ZIP directly. The previous version required the
+          user to manually extract DUSAF7.shp from the ZIP first, which
+          is not how most users handle the downloaded archive.
+          New behaviour:
+          * Selecting a .zip: the plugin scans the archive for
+            DUSAF7.shp + sidecar files (.dbf/.shx/.prj plus optional
+            .cpg/.sbn/.sbx/.shp.xml/.qpj), extracts them into a sibling
+            directory ``<zipstem>_estratto/`` next to the ZIP, then
+            loads the resulting shapefile in the project. The
+            ``DUSAF7_FILARI.*`` linear-features layer (also published
+            in the ZIP) is deliberately skipped: it is a separate layer
+            and is not used by the plugin.
+          * Selecting a .shp directly: behaves like 0.3.1/0.3.3, loads
+            the shapefile as-is. Users that have already extracted the
+            ZIP manually keep their workflow.
+          * Re-running the button on the same ZIP reuses the existing
+            extraction (one-time cost only).
+          * The mini-guide above the buttons is updated: the previous
+            "estrai DUSAF7.shp dallo ZIP" step is gone since the plugin
+            does it automatically.
+        - File picker label and tooltip updated to reflect the new
+          dual-mode behaviour.
+    0.3.3 (2026-05-15)
+        - REVERT of the 0.3.2 sys.modules purge in unload(). The purge
+          was meant to help Plugin Reloader pick up submodule edits but
+          it left the import graph in a half-broken state: the package
+          parent ``analisi_dusaf7_comune_lombardo`` was removed from
+          sys.modules while ``analisi_dusaf7_comune_lombardo
+          .analisi_dusaf7_comune_lombardo`` (the .py file) was kept.
+          On the next ``classFactory()`` call, Python re-imported the
+          .py file without a valid package context and the relative
+          imports at module top level failed with
+          "ImportError: attempted relative import with no known parent
+          package".
+          The 0.3.3 unload is the same clean version that shipped from
+          0.2.0 to 0.3.1: it only releases QGIS resources (toolbar
+          icon, menu entry, processing provider, dialog) and leaves
+          sys.modules alone.
+          Practical consequence: "Ricarica plugin" (Plugin Reloader)
+          works for top-level edits but does NOT pick up changes to
+          ui/, compat, data_sources/ or workflow/. Edit those files,
+          then RESTART QGIS to see the change. This is a Plugin
+          Reloader limitation for multi-module plugins, not something
+          we can paper over without risking other failures.
+    0.3.2 (2026-05-15)
+        - Fix: Plugin Reloader ("Ricarica plugin") now actually reloads
+          the entire plugin tree. The previous unload() only released
+          QGIS resources (toolbar icon, processing provider, dialog) but
+          did not invalidate ``sys.modules`` entries for the plugin's
+          submodules. As a result, on reload the top-level package was
+          re-imported but ``ui.main_dialog``, ``compat``, ``data_sources``
+          and ``workflow`` were silently reused from the cached versions
+          and any edit to those files required a full QGIS restart to
+          take effect.
+          Fix: at the end of unload() we iterate ``sys.modules`` and drop
+          every entry that belongs to our package (excluding the
+          currently-executing module itself, which Python still needs
+          until the call returns). The next classFactory() then pulls
+          fresh versions from disk. Verified with Plugin Reloader: edits
+          to any submodule are picked up on the first reload after this
+          version is installed.
+    0.3.1 (2026-05-15)
+        - UX: the "Stato dati" section is split into two clearly-labelled
+          peer subsections so users immediately see which data source
+          drives what:
+          * "Confini comunali - fonte ISTAT (perimetro del Comune)": one
+            sentence description explains that this is used to clip the
+            DUSAF data on the selected Comune. Same actions as before
+            (refresh list, configure ISTAT cache).
+          * "Uso del suolo - DUSAF 7.0 (dati analizzati)": one sentence
+            description explains that this is THE dataset analysed.
+            Plus a three-step numbered guide (Scarica ZIP → Estrai
+            DUSAF7.shp → Carica nel progetto) and two numbered buttons
+            that match the guide.
+        - New action: "Carica DUSAF7.shp nel progetto..." opens a file
+          picker, loads the chosen shapefile via ``iface.addVectorLayer``
+          and refreshes the status badge. Removes one of the steps the
+          user previously had to do manually after the Geoportale
+          download. Last-used directory is remembered across sessions.
+        - Status badges shortened to a common "Fonte attiva: …" pattern
+          for both subsections. Easier to scan, no more redundant prose
+          repeating the section purpose.
+    0.3.0 (2026-05-15)
+        - Architectural simplification: removed the local DUSAF cache.
+          The cache (introduced in 0.2.14) tried to make DUSAF available
+          offline by downloading the RL Geoportale ZIP and registering it
+          in the plugin profile. In practice this added two problems we
+          could not square with the plugin's promise of a clean,
+          predictable workflow:
+          * The Geoportale ZIP carries DUSAF codes at LIV5 granularity
+            (e.g. "12111", "12122"), while the REST endpoint only exposes
+            LIV4 (e.g. "1211"). This produced subtly different output
+            tables and broken QML rendering ("strade rosse mancanti")
+            depending on which source the user happened to use.
+          * Two parallel data paths (cache + REST) with overlapping
+            responsibilities meant more places for bugs to hide.
+          The plugin now exposes a single mental model:
+          1. DUSAF 7.0 loaded as a project layer (back-compat) - the
+             recommended way to work offline. The user downloads the ZIP
+             from RL Geoportale once, extracts DUSAF7.shp and loads it
+             in QGIS via Layer -> Add Vector Layer.
+          2. REST fetch for the Comune envelope - the live fallback.
+          The "Stato dati" section in the main dialog now exposes a
+          single button "Apri Geoportale RL (scarica DUSAF 7.0)" that
+          opens the official download page in the browser, plus a clear
+          status badge that tells the user which of the two sources will
+          be used.
+        - Removed code: data_sources/lombardia_dusaf_local_client.py,
+          ui/dusaf_setup_dialog.py, the DUSAF cache helpers in
+          workflow/data_resolver.py, the radio-button + setup flow in
+          ui/main_dialog.py, and the QSettings key
+          analisi_dusaf7_comune_lombardo/dusaf_source (stale entries are
+          harmless and will be ignored).
+        - New: COD_TOT field is now normalized to LIV4 (4 chars max) in
+          the workflow, BEFORE building the "clip QC" output layer. This
+          unifies the categorization across data sources: anyone loading
+          the Geoportale RL DUSAF7.shp (LIV5) now obtains the same maps
+          and statistics as the REST path (LIV4). Implemented via a new
+          ``pipeline.truncate_string_field`` helper that uses
+          ``native:fieldcalculator``. The dissolve step now groups only
+          by COD_TOT (not COD_TOT + DESCR) so each LIV4 class produces a
+          single row in the dissolve / CSV output. DESCR keeps whatever
+          value the dissolve algorithm assigns (first feature of each
+          group) and remains useful as a human-readable label.
+    0.2.16 (2026-05-15)
+        - UI simplification ("trim radicale" - user feedback). The main
+          dialog had grown cluttered with redundant cues; this release
+          removes the noise without changing the workflow:
+          * Removed the orange "Suggerimento" banner above the DUSAF
+            badge. Its message duplicated what the badge already says.
+          * Removed the standalone "Info servizio REST live" button. Its
+            content is now folded into the tooltip of the "Servizio REST
+            Regione Lombardia" radio button (hover to read).
+          * The "Fonte DUSAF" radio pair is no longer shown when there is
+            no local cache to compete with REST: in that state "forza
+            REST" is a no-op and the radios only added noise. They
+            appear automatically the moment a local cache is configured.
+          * Trimmed the "Cosa ottieni dopo l'esecuzione" group. The long
+            list of layer descriptions became a single-line summary with
+            a clickable "Dettagli nel README" link.
+          * DUSAF status badge text shortened across all four states.
+        - No functional change to the algorithm, no settings migration,
+          no parameter changes. Smaller dialog, faster to read, same
+          features one click away.
+    0.2.15 (2026-05-15)
+        - Polish + bug fixes for the new DUSAF local cache feature:
+          * Fix TypeError ("unhashable type: 'dict'") raised by the setup
+            dialog when validating the ZIP. The helper
+            find_shapefile_components returns a nested dict, not a flat
+            mapping; the log line now only iterates over the actual file
+            paths inside ``components["present"]``, and also reports the
+            list of missing components when applicable.
+          * Long Geoportale RL / ISTAT URLs were displayed inline and on a
+            small dialog they pushed horizontal scrolling, hiding the
+            "Sfoglia ZIP..." button. Both setup dialogs now show a short
+            clickable link ("Apri la pagina ufficiale ...") instead of the
+            full query-string URL. License attribution (CC BY 4.0) is
+            shown explicitly. The full URL stays in the ``href`` attribute
+            so right-click -> Copy link keeps working.
+        - Main dialog: explicit DUSAF source selector. The "Stato dati" box
+          now exposes an orange-styled hint that the RL REST DUSAF service
+          may be down, plus a radio pair under the DUSAF status badge:
+          * "Automatica (cache locale se configurata, altrimenti REST)"
+            - default, kept exactly the same as 0.2.14.
+          * "Forza servizio REST Regione Lombardia"
+            - bypass the local cache even when present. Useful for testing
+              the live service.
+          The choice is persisted in QSettings under
+          ``analisi_dusaf7_comune_lombardo/dusaf_source`` and respected by
+          the algorithm. The DUSAF status badge now reports four states:
+          project layer / cache used / cache ignored (forced REST) / REST
+          fallback.
+        - New "Info servizio REST live" button next to "Configura DUSAF
+          locale..." opens a short popup explaining the REST endpoint and
+          the recommended workaround when it is unavailable. Mirrors the
+          UX of the existing ISTAT setup button.
+    0.2.14 (2026-05-15)
+        - New feature: optional local DUSAF 7.0 cache. The Regione Lombardia
+          ArcGIS REST endpoint for DUSAF has been hitting recurrent outages
+          ("Failed to execute query.." on every page) and was the only
+          single-point-of-failure left in the workflow. This release adds a
+          mirror of the ISTAT setup flow for DUSAF: the user downloads the
+          official DUSAF 7.0 polygons ZIP once from the RL Geoportale,
+          points the new "Usa DUSAF locale (setup)" dialog at the file, and
+          the plugin extracts + caches the shapefile in the QGIS profile.
+          From that moment the workflow reads DUSAF locally and bypasses
+          REST entirely. New DUSAF source resolution order:
+          1. Project layer (back-compat, unchanged).
+          2. Local DUSAF cache (NEW).
+          3. REST fetch (unchanged fallback).
+          Components added:
+          * data_sources/lombardia_dusaf_local_client.py with validate /
+            extract / register / clear-cache, reusing the generic archive
+            helpers already used by the ISTAT client (parameterised by
+            layer name = "DUSAF7").
+          * ui/dusaf_setup_dialog.py: same UX as the ISTAT setup dialog.
+          * workflow/data_resolver.py: get_dusaf_cached_shapefile_path and
+            load_dusaf_layer_from_local_cache helpers.
+          * algorithm.py: _get_required_dusaf_layer now tries the local
+            cache before falling back to REST; same envelope pre-filter
+            applies (extractbyextent) so only the Comune's bbox is
+            processed, not the full ~480 MB shapefile.
+          * ui/main_dialog.py: new "Usa DUSAF locale (setup)" button in
+            the Stato dati box; the DUSAF status badge now reports the
+            three states (project / local cache / REST fallback) so the
+            user always knows which source will be used.
+        - Existing ISTAT cache and Comuni autocomplete logic are unchanged.
+    0.2.13 (2026-05-15)
+        - Fix: "Aggiorna cache lista Comuni" silently bypassed the ISTAT
+          cache and always hit the (currently unreliable) RL REST endpoint,
+          even when the user had explicitly configured ISTAT as the
+          authoritative source. The badge correctly reported "cache ISTAT
+          2026 (fonte ufficiale)" but every refresh produced
+          "Comuni ArcGIS response contains an error: Failed to execute
+          query..".
+          Root cause: workflow/data_resolver.get_comuni_list_for_autocomplete
+          wrapped BOTH the ISTAT and the lightweight JSON cache lookups
+          inside the same ``if not force_refresh`` guard. The intent of
+          force_refresh was only to invalidate the lightweight JSON cache
+          (last RL fetch); the ISTAT shapefile cache is a third-party
+          offline dataset and must always be preferred when present.
+          Fix: the ISTAT lookup is now unconditional; force_refresh keeps
+          its original semantic for the JSON cache only.
+        - With this change, configuring ISTAT via the setup dialog makes
+          the plugin fully usable for autocomplete + Comune selection even
+          while the RL "Ambiti Amministrativi" service is down.
+    0.2.12 (2026-05-15)
+        - "Aggiorna cache lista Comuni" button now gives clear feedback
+          on QGIS 4.0 (and 3.x). Two bugs were combined:
+          1) UX bug: when the REST refresh failed, the error label was
+             immediately overwritten by the generic "Lista Comuni non
+             disponibile" placeholder coming from _on_comune_text_changed,
+             so the user saw no change after clicking the button.
+             Fix: _populate_comune_autocomplete now skips the generic
+             rebuild when the refresh raised, and the error label
+             explicitly tells the user the RL service may be down and
+             suggests the ISTAT cache as alternative.
+          2) Click handler: it logged "[INFO] Forzato refresh..." into the
+             execution log widget at the bottom of the dialog, which on
+             small screens is off-screen. Added an immediate status badge
+             at the top of the dialog ("Aggiornamento lista Comuni in
+             corso...") plus QApplication.processEvents() so the message
+             paints before the (potentially slow) REST call starts.
+        - Second wave of Qt6-strict (QGIS 4.0) compatibility:
+          QGIS core scoped enums also lose their flat aliases on strict
+          Qt6 bindings. Added compat shims and routed all call sites:
+          * QgsFeatureRequest.NoGeometry        -> FEATURE_REQUEST_NO_GEOMETRY
+          * QgsFeatureRequest.GeometrySkipInvalid -> FEATURE_REQUEST_GEOMETRY_SKIP_INVALID
+          * QgsVectorFileWriter.NoError         -> VFW_NO_ERROR
+          * QgsVectorFileWriter.CreateOrOverwriteFile  -> VFW_CREATE_OR_OVERWRITE_FILE
+          * QgsVectorFileWriter.CreateOrOverwriteLayer -> VFW_CREATE_OR_OVERWRITE_LAYER
+          * QgsProcessingParameterNumber.Double -> PROC_NUM_DOUBLE
+          (Same lazy two-step resolver used for the Qt enums in 0.2.8/0.2.9:
+          tries the scoped form Qgs<Class>.<EnumName>.<Member> first, falls
+          back to the flat alias for QGIS 3.x.)
+    0.2.11 (2026-05-15)
+        - Dark-theme readability fix for QGIS 4.0: the "Cosa ottieni dopo
+          l'esecuzione" panel had only background-color hardcoded but no
+          explicit text colour, so under QGIS 4.0's default dark theme the
+          text inherited the theme's white foreground and became invisible
+          on the light panel background. The subtitle / intro labels and
+          the output-mode hint had the opposite issue (dark grey colour
+          forced over the dark theme background).
+          * ui/main_dialog.py: info_label now forces color:#1a1a1a together
+            with the light background; the subtitle drops the hardcoded
+            colour entirely so the theme can decide; output_mode_hint
+            switched to #cc7700 (legible on both light and dark themes).
+          * ui/istat_setup_dialog.py: intro label drops the hardcoded grey
+            (color:#555) for the same reason.
+          The colour-coded status badges (STATUS_OK/INFO/WARN/ERROR_STYLE)
+          already specify both color and background, so they stay readable
+          on either theme and were left as-is.
+    0.2.10 (2026-05-15)
+        - Low-resolution screen support: a user reported that on small
+          displays (e.g. 1366x768 laptops or higher DPI scaling) the dialog
+          could not be shrunk below the preferred size, leaving some
+          buttons unreachable. Both dialogs (main and ISTAT setup) now
+          wrap their body in a QScrollArea so the content scrolls vertically
+          when the window is smaller than the natural layout, and the
+          minimum size has been lowered:
+          * ui/main_dialog.py: setMinimumSize 720x640 -> 480x360,
+            resize hint 760x680. Content wrapped in QScrollArea
+            (widgetResizable=True, frame: NoFrame).
+          * ui/istat_setup_dialog.py: setMinimumSize 640x540 -> 420x320,
+            resize hint 680x580. Same QScrollArea wrap.
+        - compat.py: added FRAME_NO_FRAME alias (Qt6-strict-safe).
+    0.2.9 (2026-05-15)
+        - Second round of Qt6-strict (QGIS 4.0 Norrkoping) fixes:
+          0.2.8 covered the Qt.* flat enums but the same gotcha applies to
+          scoped enums on widget classes. On QGIS 4.0 the dialog crashed at
+          "QCompleter.PopupCompletion" because that lives only as
+          QCompleter.CompletionMode.PopupCompletion in strict Qt6.
+          * compat.py: new generic _class_enum(cls, scope, member) resolver
+            (same lazy two-step logic as _qt_enum). Added named aliases:
+            COMPLETER_POPUP, FONT_MONOSPACE, SIZE_POLICY_EXPANDING,
+            SIZE_POLICY_MINIMUM, MSGBOX_YES, MSGBOX_NO,
+            TEXTCURSOR_LINE_UNDER_CURSOR.
+          * algorithm + ui/main_dialog + ui/istat_setup_dialog: all bare
+            QCompleter.PopupCompletion, QFont.Monospace, QSizePolicy.Expanding,
+            QSizePolicy.Minimum, QMessageBox.Yes/No and
+            QTextCursor.LineUnderCursor references routed through compat.
+    0.2.8 (2026-05-15)
+        - Fix QGIS 4.0 / Qt6-strict crash at plugin load:
+          "AttributeError: type object 'Qt' has no attribute 'RichText'".
+          On Qt6 strict bindings (QGIS 4.0 Norrkoping) the flat enum aliases
+          Qt.RichText / Qt.CaseInsensitive / Qt.MatchStartsWith /
+          Qt.MatchContains / Qt.WaitCursor / Qt.AlignLeft were removed:
+          they now live exclusively in their scoped form
+          (Qt.TextFormat.RichText, Qt.CaseSensitivity.CaseInsensitive, ...).
+          The previous compat shim used
+          getattr(getattr(Qt, "TextFormat", Qt), "RichText", Qt.RichText),
+          but the third argument of getattr is evaluated eagerly, so the
+          flat fallback raised before the scoped lookup could succeed.
+          * compat.py: new lazy resolver _qt_enum(scope, member) that
+            tries Qt.<scope>.<member> first, then falls back to flat
+            Qt.<member>. All five aliases plus two new ones
+            (MATCH_CONTAINS, ALIGN_LEFT) routed through it.
+          * algorithm + ui/main_dialog + ui/istat_setup_dialog: all direct
+            references to Qt.RichText / Qt.CaseInsensitive / Qt.MatchContains
+            / Qt.MatchStartsWith / Qt.WaitCursor / Qt.AlignLeft replaced
+            with the compat aliases.
+        - Tested on QGIS 3.40 (Qt5) and QGIS 4.0.0 (Qt6 strict): plugin
+          loads, dialog opens, autocomplete and status badges render.
+    0.2.7 (2026-05-17)
+        - Code Quality scanner reported 8 W504 ("line break after binary
+          operator") and 1 W391 ("blank line at end of file") because the
+          plugins.qgis.org Flake8 configuration enables BOTH W503 and W504,
+          which are mutually exclusive. The 0.2.6 fix that satisfied W503
+          ended up triggering W504. To satisfy both at once we removed the
+          multi-line boolean expressions entirely:
+          * algorithm.py: the two name/membership tests in
+            _find_project_layer_by_name_and_fields and
+            _find_comuni_project_layer now use any()/all() over a tuple
+            of boolean atoms (no binary operator on the indentation
+            boundary).
+          * lombardia_dusaf_client.py: the long "max_pages reached" log
+            line is now a single .format() call over implicit string
+            concatenation.
+          * main_dialog.py: the membership test in _find_project_layer
+            became a small _matches() inner helper that returns any()
+            over a tuple, called from any(_matches(cand) for cand ...).
+          * main_dialog.py W391: removed the extra blank line left at
+            end of file by the 0.2.6 cleanup of _cleanup_newly_added_layers.
+        - No functional change: pytest still 97/97 green; Bandit Medium/High
+          still 0 issues.
+    0.2.6 (2026-05-17)
+        - Data attribution clarified: explicit CC BY 4.0 statement for
+          the third-party datasets the plugin consumes (DUSAF 7.0 and
+          Ambiti Amministrativi from Regione Lombardia Geoportale; ISTAT
+          2026 confines from Istituto Nazionale di Statistica). New
+          "Attribuzione dati / Data attribution" section in README.md with
+          bilingual licence statement and a suggested citation template.
+          stili/ATTRIBUZIONE_STILI.txt rewritten to spell out the CC BY
+          4.0 provenance of the symbology and the AGPL-3.0 of the code.
+          metadata.txt "about" extended with a Data attribution line in
+          both English and Italian.
+        - Runtime log now emits an [ATTR] line at workflow start so the
+          attribution is visible in every Processing run log
+          ("[ATTR] Dati: ... (c) Regione Lombardia (CC BY 4.0); ...").
+        - Close 14 Flake8 findings raised by the plugins.qgis.org Code
+          Quality scanner (W292/W293 trailing newline issues, W503 line
+          break before binary operator, F541 useless f-string, E305 blank
+          lines after function, F841 dead local pre_run_layer_ids). No
+          functional change to the workflow; tests still 97 green.
+    0.2.5 (2026-05-17)
+        - Remove the remaining Plugin Builder dev-tool folders that
+          plugins.qgis.org "Suspicious Files" scanner flagged:
+          * help/ (Sphinx docs scaffolding, including help/make.bat and
+            help/Makefile)
+          * scripts/ (translation helpers: compile-strings.sh,
+            update-strings.sh, run-env-linux.sh)
+          None of these are used at runtime by QGIS; we keep README.md as
+          the user-facing documentation. The dev-only Makefile and
+          pb_tool.cfg at the plugin root are unchanged: they are inert
+          text files and were not flagged.
+    0.2.4 (2026-05-17)
+        - Bandit security fixes (4 issues raised by the plugins.qgis.org
+          scanner that blocked the 0.2.3 upload):
+          * Add explicit URL scheme validation (http/https only) before
+            every urlopen() call in lombardia_dusaf_client,
+            lombardia_comuni_client and istat_boundaries_client. The
+            urlopen() lines are tagged "# nosec B310 - scheme validated
+            above" to suppress the warning for an explicitly checked path.
+          * Remove the Plugin Builder boilerplate plugin_upload.py from the
+            distributed package. It was a developer-only CLI script that
+            imported xmlrpc.client (Bandit B411) and never ran inside QGIS;
+            uploads to plugins.qgis.org happen via the web UI.
+    0.2.3 (2026-05-12)
         - Add LICENSE file (no extension) at the plugin root so the QGIS
           Plugin Repository validator stops complaining
           ("Cannot find LICENSE in the plugin package").
@@ -65,7 +679,7 @@ tags=dusaf, lombardia, lombardy, comuni, municipalities, uso del suolo, land use
 homepage=https://github.com/marcols-126/qgis-plugin-dusaf7-comuni-lombardi
 category=Vector
 icon=icon.png
-experimental=True
+experimental=False
 deprecated=False
 
 # plugin_dependencies=

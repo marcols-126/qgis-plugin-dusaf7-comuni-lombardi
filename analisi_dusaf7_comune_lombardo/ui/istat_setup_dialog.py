@@ -17,9 +17,8 @@ ArcGIS REST service when the cache is missing or stale.
 
 import os
 
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QDesktopServices, QFont
 from qgis.PyQt.QtCore import QUrl
+from qgis.PyQt.QtGui import QDesktopServices, QFont
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QDialog,
@@ -31,11 +30,23 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QSizePolicy,
+    QScrollArea,
     QSpacerItem,
     QVBoxLayout,
+    QWidget,
 )
 
+from ..compat import (
+    ALIGN_LEFT,
+    CURSOR_WAIT,
+    FONT_MONOSPACE,
+    FRAME_NO_FRAME,
+    MSGBOX_NO,
+    MSGBOX_YES,
+    SIZE_POLICY_EXPANDING,
+    SIZE_POLICY_MINIMUM,
+    TEXT_FORMAT_RICH,
+)
 from ..data_sources import CacheManager, IstatBoundariesClient
 
 
@@ -51,7 +62,10 @@ class IstatSetupDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Configurazione confini ISTAT 2026 (opzionale)")
-        self.setMinimumSize(640, 540)
+        # Stay friendly on low-resolution screens: keep the minimum small and
+        # wrap the content in a QScrollArea (see ``_build_ui``).
+        self.setMinimumSize(420, 320)
+        self.resize(680, 580)
 
         self._client = IstatBoundariesClient()
         self._cache_manager = CacheManager()
@@ -66,11 +80,27 @@ class IstatSetupDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        # Wrap the body in a QScrollArea so the dialog stays usable on
+        # low-resolution screens. All widgets that used to live directly on
+        # ``self`` now live inside the inner content widget; ``root`` keeps
+        # building the same layout as before.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(FRAME_NO_FRAME)
+        outer.addWidget(scroll)
+
+        content = QWidget()
+        scroll.setWidget(content)
+
+        root = QVBoxLayout(content)
         root.setSpacing(10)
 
         header = QLabel("<h2 style='margin:0;'>Confini ISTAT 2026 - Configurazione</h2>")
-        header.setTextFormat(Qt.RichText)
+        header.setTextFormat(TEXT_FORMAT_RICH)
         root.addWidget(header)
 
         intro = QLabel(
@@ -81,7 +111,8 @@ class IstatSetupDialog(QDialog):
             "ISTAT come fonte primaria al posto del servizio REST RL."
         )
         intro.setWordWrap(True)
-        intro.setStyleSheet("color:#555;")
+        # No hardcoded colour: keep the intro readable on both light (3.x)
+        # and dark (4.0) QGIS themes.
         root.addWidget(intro)
 
         # === Step 1 - Open ISTAT page ===
@@ -89,20 +120,22 @@ class IstatSetupDialog(QDialog):
         s1_layout = QVBoxLayout(step1)
 
         url_label = QLabel(
-            f'Apri la pagina ISTAT (URL: '
-            f'<a href="{self._client.landing_page_url}">'
-            f'{self._client.landing_page_url}</a>) e scarica '
-            f'lo ZIP del dataset <b>Confini amministrativi {self._client.reference_year}</b> '
-            f'(versione <i>non generalizzato</i>, CRS {self._client.expected_crs_label}).'
+            f'Scarica lo ZIP del dataset <b>Confini amministrativi '
+            f'{self._client.reference_year}</b> (versione <i>non '
+            f'generalizzato</i>, CRS {self._client.expected_crs_label}). '
+            f'Licenza dati: <i>ISTAT, CC BY 4.0</i>.<br>'
+            f'&nbsp;&nbsp;&rarr; <a href="{self._client.landing_page_url}">'
+            f'Apri la pagina ufficiale ISTAT</a>'
         )
-        url_label.setTextFormat(Qt.RichText)
+        url_label.setTextFormat(TEXT_FORMAT_RICH)
         url_label.setWordWrap(True)
         url_label.setOpenExternalLinks(True)
+        url_label.setMinimumWidth(0)
         s1_layout.addWidget(url_label)
 
         open_btn = QPushButton("Apri pagina ISTAT nel browser")
         open_btn.clicked.connect(self._on_open_istat_page)
-        s1_layout.addWidget(open_btn, alignment=Qt.AlignLeft)
+        s1_layout.addWidget(open_btn, alignment=ALIGN_LEFT)
 
         root.addWidget(step1)
 
@@ -130,13 +163,13 @@ class IstatSetupDialog(QDialog):
         self._prepare_btn = QPushButton("Estrai e prepara cache locale")
         self._prepare_btn.setEnabled(False)
         self._prepare_btn.clicked.connect(self._on_prepare_clicked)
-        s3_layout.addWidget(self._prepare_btn, alignment=Qt.AlignLeft)
+        s3_layout.addWidget(self._prepare_btn, alignment=ALIGN_LEFT)
 
         self._log_widget = QPlainTextEdit()
         self._log_widget.setReadOnly(True)
         self._log_widget.setMaximumBlockCount(500)
         log_font = QFont("Consolas")
-        log_font.setStyleHint(QFont.Monospace)
+        log_font.setStyleHint(FONT_MONOSPACE)
         log_font.setPointSize(9)
         self._log_widget.setFont(log_font)
         self._log_widget.setPlaceholderText(
@@ -153,7 +186,7 @@ class IstatSetupDialog(QDialog):
 
         self._status_label = QLabel("...")
         self._status_label.setWordWrap(True)
-        self._status_label.setTextFormat(Qt.RichText)
+        self._status_label.setTextFormat(TEXT_FORMAT_RICH)
         status_layout.addWidget(self._status_label)
 
         actions_row = QHBoxLayout()
@@ -171,7 +204,7 @@ class IstatSetupDialog(QDialog):
 
         # === Bottom buttons ===
         buttons = QHBoxLayout()
-        buttons.addSpacerItem(QSpacerItem(40, 1, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        buttons.addSpacerItem(QSpacerItem(40, 1, SIZE_POLICY_EXPANDING, SIZE_POLICY_MINIMUM))
         close_btn = QPushButton("Chiudi")
         close_btn.clicked.connect(self.accept)
         buttons.addWidget(close_btn)
@@ -248,7 +281,7 @@ class IstatSetupDialog(QDialog):
 
         self._log_widget.appendPlainText("")
         self._log_widget.appendPlainText("[INFO] Validazione contenuto ZIP...")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QApplication.setOverrideCursor(CURSOR_WAIT)
         QApplication.processEvents()
 
         try:
@@ -256,8 +289,10 @@ class IstatSetupDialog(QDialog):
             present = components.get("present", []) if isinstance(components, dict) else []
             present_names = sorted(os.path.basename(p) for p in present)
             self._log_widget.appendPlainText(
-                f"[OK] Componenti shapefile trovati ({len(present_names)} file): "
-                + ", ".join(present_names)
+                "[OK] Componenti shapefile trovati ({} file): {}".format(
+                    len(present_names),
+                    ", ".join(present_names),
+                )
             )
 
             self._log_widget.appendPlainText(
@@ -272,7 +307,7 @@ class IstatSetupDialog(QDialog):
             )
 
             shp_path = entry.get("shapefile_path", "(percorso non disponibile)")
-            self._log_widget.appendPlainText(f"[OK] Cache ISTAT pronta.")
+            self._log_widget.appendPlainText("[OK] Cache ISTAT pronta.")
             self._log_widget.appendPlainText(f"     Shapefile: {shp_path}")
 
             self._cache_changed = True
@@ -307,10 +342,10 @@ class IstatSetupDialog(QDialog):
             "Conferma rimozione cache ISTAT",
             "Eliminare la cache ISTAT? Il flusso di lavoro tornerà a usare "
             "il servizio REST Regione Lombardia come default.",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            MSGBOX_YES | MSGBOX_NO,
+            MSGBOX_NO,
         )
-        if confirm != QMessageBox.Yes:
+        if confirm != MSGBOX_YES:
             return
 
         try:

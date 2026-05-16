@@ -11,9 +11,31 @@ import shutil
 import zipfile
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from .cache_manager import ISTAT_CACHE_FOLDER
+
+
+_ALLOWED_URL_SCHEMES = ("http", "https")
+
+
+def _validate_url_scheme(url):
+    """Reject URLs whose scheme is not HTTP(S).
+
+    Bandit's B310 ("urllib_urlopen") warns that ``urlopen`` accepts any
+    scheme, including ``file://`` and other schemes that can be abused as
+    SSRF or local-file disclosure vectors. We validate the scheme up-front
+    so the call site can safely use ``urlopen`` for HTTP(S) only.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_URL_SCHEMES:
+        raise ValueError(
+            "ISTAT URL has unsupported scheme '{}': only http/https allowed.".format(
+                parsed.scheme
+            )
+        )
+    return url
 
 
 ISTAT_BOUNDARIES_PAGE_URL = (
@@ -552,8 +574,9 @@ class IstatBoundariesClient:
                 "Temporary ISTAT download file already exists: {}.".format(temp_path)
             )
 
+        _validate_url_scheme(download_url)
         try:
-            with urlopen(download_url, timeout=self.download_timeout_seconds) as response:
+            with urlopen(download_url, timeout=self.download_timeout_seconds) as response:  # nosec B310 - scheme validated above
                 status = getattr(response, "status", 200)
                 if status < 200 or status >= 300:
                     raise ValueError(

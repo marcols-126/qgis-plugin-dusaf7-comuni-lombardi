@@ -174,6 +174,33 @@ def dissolve_by_fields(input_layer, fields, context, feedback, out_name):
     )
 
 
+def truncate_string_field(input_layer, field_name, max_length, context, feedback, out_name):
+    """Overwrite ``field_name`` with the substring of its current value
+    truncated to at most ``max_length`` characters.
+
+    Implemented via ``native:fieldcalculator`` with ``substr(field, 1, N)``.
+    Used to normalize the DUSAF ``COD_TOT`` field from LIV5 (5 chars) to
+    LIV4 (4 chars) so the categorized QML styles (calibrated on LIV4)
+    match every DUSAF source uniformly (REST returns LIV4 already, the
+    Geoportale RL shapefile carries the deeper LIV5).
+    """
+    return run_algorithm(
+        "native:fieldcalculator",
+        {
+            "INPUT": input_layer,
+            "FIELD_NAME": field_name,
+            "FIELD_TYPE": 2,  # 2 == String in QGIS native:fieldcalculator
+            "FIELD_LENGTH": int(max_length),
+            "FIELD_PRECISION": 0,
+            "FORMULA": 'substr("{}", 1, {})'.format(field_name, int(max_length)),
+            "OUTPUT": QgsProcessing.TEMPORARY_OUTPUT,
+        },
+        context,
+        feedback,
+        out_name,
+    )
+
+
 def multipart_to_singleparts(input_layer, context, feedback, out_name):
     """Explode multipart geometries into singleparts."""
     return run_algorithm(
